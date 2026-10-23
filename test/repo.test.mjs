@@ -34,7 +34,8 @@ test("manifest：client 入口与 files 白名单齐全", () => {
   for (const f of ["index.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg"]) {
     assert.ok(PKG.files.includes(f), "files 缺少 " + f);
   }
-  assert.ok(PKG.files.includes("assets/demo.gif"), "README 用的演示图应随包发布");
+  assert.ok(!PKG.files.includes("assets/demo.gif"), "1.9MB 演示图不该进 npm 包（README 用绝对地址）");
+  assert.ok(/raw\.githubusercontent\.com.*assets\/demo\.gif/.test(read("README.md")), "README 演示图应为绝对地址，否则 npm 页面不显示");
 });
 
 test("manifest：兼容范围必须收紧到实测过的版本带", () => {

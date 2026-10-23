@@ -23,7 +23,6 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "assets/demo.gif",
     "CHANGELOG.md"
   ],
   "scripts": {

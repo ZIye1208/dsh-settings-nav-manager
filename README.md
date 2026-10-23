@@ -8,7 +8,7 @@
 
 ## 产品演示
 
-![产品演示：进入编辑模式、拖拽排序、眼睛显隐、抽屉收纳](./assets/demo.gif)
+![产品演示：进入编辑模式、拖拽排序、眼睛显隐、抽屉收纳](https://raw.githubusercontent.com/ZIye1208/dsh-settings-nav-manager/main/assets/demo.gif)
 
 ---
 
