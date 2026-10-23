@@ -7,6 +7,7 @@ const NS = "settings-nav-manager";
 // order = 全局相对顺序（section id 数组，含分组内条目）。
 // groups = 自定义分组（P2 预留，P1 恒为空数组）。
 // hidden = 隐藏分区 id 数组。
+// hideEntry = 是否隐藏主界面侧栏的「设置导航」入口（编辑模式里齿轮旁开关）。
 const Config = z.object({
   version: z.number().default(1),
   order: z.array(z.string()).default([]),
@@ -21,6 +22,7 @@ const Config = z.object({
     )
     .default([]),
   hidden: z.array(z.string()).default([]),
+  hideEntry: z.boolean().default(false),
 }).volatile();
 
 // P1 纯 client 侧 DOM 干预 + remote.settings 持久化；Host 只持有 volatile Config schema

@@ -5,7 +5,7 @@
   },
   "gear": "Edit navigation",
   "gearExit": "Exit navigation editing",
-  "editHint": "Drag to reorder · Click eye to hide · Double-click to rename · Collect into drawers",
+  "editHint": "Drag to reorder · Eye hides · Double-click renames · Drawers collect · Switch by the gear hides the sidebar entry",
   "keyboardHint": "Alt+↑/↓ reorder · h hide · Enter collapse · F2 rename",
   "hidden": "Hidden",
   "show": "Show",
@@ -18,5 +18,18 @@
   "recognizeFailed": "Navigation changed; layout not applied yet",
   "newGroup": "New drawer",
   "addGroup": "+ New drawer",
-  "dissolve": "Dissolve drawer"
+  "dissolve": "Dissolve drawer",
+  "panel": "Settings navigation",
+  "pageHint": "Pick a section to open its settings directly",
+  "empty": "Settings sections are not registered yet",
+  "retry": "Retry",
+  "openFailed": "Could not open settings — press Ctrl+, and try again",
+  "showHidden": "Show hidden sections",
+  "hideHidden": "Hide hidden sections",
+  "entry": "Sidebar entry",
+  "entryOn": "Shown",
+  "entryOff": "Hidden",
+  "entryShowHint": "Hide the “Settings navigation” row in the left sidebar",
+  "entryHideHint": "Show the “Settings navigation” row in the left sidebar again",
+  "entryFailed": "Could not toggle the sidebar entry — try again"
 }

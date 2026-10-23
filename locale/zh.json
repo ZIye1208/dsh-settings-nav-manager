@@ -5,7 +5,7 @@
   },
   "gear": "编辑导航",
   "gearExit": "退出编辑导航",
-  "editHint": "拖拽排序 · 点眼睛隐藏 · 双击改名 · 可收纳",
+  "editHint": "拖拽排序 · 点眼睛隐藏 · 双击改名 · 可收纳 · 齿轮旁开关控制侧栏入口",
   "keyboardHint": "Alt+↑/↓ 排序 · h 显隐 · Enter 折叠 · F2 改名",
   "hidden": "已隐藏",
   "show": "显示",
@@ -18,5 +18,18 @@
   "recognizeFailed": "导航结构变化，暂未应用整理",
   "newGroup": "新抽屉",
   "addGroup": "＋ 新建抽屉",
-  "dissolve": "解散抽屉"
+  "dissolve": "解散抽屉",
+  "panel": "设置导航",
+  "pageHint": "点击任意分区，直接打开对应设置",
+  "empty": "设置分区尚未注册完成",
+  "retry": "重试",
+  "openFailed": "未能打开设置，请按 Ctrl+, 打开后再试",
+  "showHidden": "显示已隐藏分区",
+  "hideHidden": "收起已隐藏分区",
+  "entry": "侧栏入口",
+  "entryOn": "显示中",
+  "entryOff": "已隐藏",
+  "entryShowHint": "隐藏左侧插件栏的「设置导航」入口",
+  "entryHideHint": "重新显示左侧插件栏的「设置导航」入口",
+  "entryFailed": "侧栏入口切换失败，请稍后重试"
 }

@@ -27,6 +27,10 @@ window.__ModuleLoader__.load({
 
     var NS = "settings-nav-manager";
     var STYLE_TAG = "settings-nav-manager-style";
+    // 侧栏插件栏入口与 main 页面的同一个 id：
+    //  * layout 用 `main` 槽里 key === id 的条目判断面板存在（否则 selectPanel 抛错）；
+    //  * sidebar 用 `sidebar.panellist` 里的 id 渲染行、点击时切过去。
+    var PANEL_ID = "settings-nav";
 
     // ── 选择器 / 数据属性常量表（升级断链只改这一处）──────────────
     var SEL = {
@@ -57,6 +61,9 @@ window.__ModuleLoader__.load({
       gear: "data-snm-gear",
       notice: "data-snm-notice",
       sr: "data-snm-sr",
+      page: "data-snm-page",
+      pageRow: "data-snm-page-row",
+      pageId: "data-snm-page-id",
     };
 
     var ZONE_EYE = 40; // 命中眼睛分区（相对行右侧，px）
@@ -70,7 +77,7 @@ window.__ModuleLoader__.load({
       zh: {
         gear: "编辑导航",
         gearExit: "退出编辑导航",
-        editHint: "拖拽排序 · 点眼睛隐藏 · 双击改名 · 可收纳",
+        editHint: "拖拽排序 · 点眼睛隐藏 · 双击改名 · 可收纳 · 齿轮旁开关控制侧栏入口",
         keyboardHint: "Alt+↑/↓ 排序 · h 显隐 · Enter 折叠 · F2 改名",
         hidden: "已隐藏",
         show: "显示",
@@ -84,11 +91,24 @@ window.__ModuleLoader__.load({
         newGroup: "新抽屉",
         addGroup: "＋ 新建抽屉",
         dissolve: "解散抽屉",
+        panel: "设置导航",
+        pageHint: "点击任意分区，直接打开对应设置",
+        empty: "设置分区尚未注册完成",
+        retry: "重试",
+        openFailed: "未能打开设置，请按 Ctrl+, 打开后再试",
+        showHidden: "显示已隐藏分区",
+        hideHidden: "收起已隐藏分区",
+        entry: "侧栏入口",
+        entryOn: "显示中",
+        entryOff: "已隐藏",
+        entryShowHint: "隐藏左侧插件栏的「设置导航」入口",
+        entryHideHint: "重新显示左侧插件栏的「设置导航」入口",
+        entryFailed: "侧栏入口切换失败，请稍后重试",
       },
       en: {
         gear: "Edit navigation",
         gearExit: "Exit navigation editing",
-        editHint: "Drag to reorder · Click eye to hide · Double-click to rename · Collect into drawers",
+        editHint: "Drag to reorder · Eye hides · Double-click renames · Drawers collect · Switch by the gear hides the sidebar entry",
         keyboardHint: "Alt+↑/↓ reorder · h hide · Enter collapse · F2 rename",
         hidden: "Hidden",
         show: "Show",
@@ -102,6 +122,19 @@ window.__ModuleLoader__.load({
         newGroup: "New drawer",
         addGroup: "+ New drawer",
         dissolve: "Dissolve drawer",
+        panel: "Settings navigation",
+        pageHint: "Pick a section to open its settings directly",
+        empty: "Settings sections are not registered yet",
+        retry: "Retry",
+        openFailed: "Could not open settings — press Ctrl+, and try again",
+        showHidden: "Show hidden sections",
+        hideHidden: "Hide hidden sections",
+        entry: "Sidebar entry",
+        entryOn: "Shown",
+        entryOff: "Hidden",
+        entryShowHint: "Hide the “Settings navigation” row in the left sidebar",
+        entryHideHint: "Show the “Settings navigation” row in the left sidebar again",
+        entryFailed: "Could not toggle the sidebar entry — try again",
       },
     };
 
@@ -137,6 +170,7 @@ window.__ModuleLoader__.load({
           return { id: g.id, name: g.name, collapsed: !!g.collapsed, items: g.items.slice() };
         }),
         hidden: s.hidden.slice(),
+        hideEntry: s.hideEntry === true,
       };
     }
     function findGroup(state, id) {
@@ -218,6 +252,53 @@ window.__ModuleLoader__.load({
       return out;
     }
 
+    // ── 页面行投影（纯函数）：把 order / groups / hidden 摊平成一维可点列表 ──
+    // 抽屉里的成员紧跟着抽屉名连续出现（页面不是设置导航，不做折叠）；
+    // 未落位的分区按宿主 order 追加，保证「新装插件立刻可点」。
+    function flattenNav(sections, state) {
+      var byId = dict();
+      var hidden = dict();
+      var rows = [];
+      var placed = dict();
+      var i;
+      var j;
+      for (i = 0; i < sections.length; i++) if (sections[i].id) byId[sections[i].id] = sections[i];
+      for (i = 0; i < state.hidden.length; i++) hidden[state.hidden[i]] = 1;
+      function push(id, groupName) {
+        var s = byId[id];
+        if (!s || own(placed, id)) return;
+        placed[id] = 1;
+        rows.push({ id: id, label: s.label, hidden: own(hidden, id), group: groupName || "" });
+      }
+      for (i = 0; i < state.order.length; i++) {
+        var g = findGroup(state, state.order[i]);
+        if (g) {
+          for (j = 0; j < g.items.length; j++) push(g.items[j], g.name);
+        } else {
+          push(state.order[i], "");
+        }
+      }
+      for (i = 0; i < sections.length; i++) push(sections[i].id, "");
+      return rows;
+    }
+
+    // sections 指纹：id / order / label 任一变化就要通知页面重渲染
+    function sectionsSignature(sections) {
+      var parts = [];
+      for (var i = 0; i < sections.length; i++) {
+        parts.push(sections[i].id + "\u0001" + sections[i].order + "\u0001" + sections[i].label);
+      }
+      return parts.join("\u0002");
+    }
+
+    // 行的首字徽标：按码点取首字符（emoji/中文都不会被截成半个代理对）
+    function glyphOf(label) {
+      var s = label === undefined || label === null ? "" : String(label);
+      if (!s) return "?";
+      var chars = typeof Array.from === "function" ? Array.from(s) : s.split("");
+      return chars[0] || "?";
+    }
+
     // ── 持久化态：读取归一化（纯函数，异常输入一律回退默认）─────────
     function createState(raw) {
       var v = raw && typeof raw === "object" ? raw : {};
@@ -239,6 +320,8 @@ window.__ModuleLoader__.load({
         order: Array.isArray(v.order) ? v.order.filter(isStr) : [],
         groups: groups,
         hidden: Array.isArray(v.hidden) ? v.hidden.filter(isStr) : [],
+        // 旧版本没有这个字段：缺省 = 显示，绝不把老用户入口藏掉
+        hideEntry: v.hideEntry === true,
       };
     }
 
@@ -335,6 +418,8 @@ window.__ModuleLoader__.load({
         hidden: state.hidden.filter(function (id) {
           return own(known, id);
         }),
+        // 布尔开关：跟着写盘走，但不受 known id 域影响
+        hideEntry: state.hideEntry === true,
       };
     }
 
@@ -513,6 +598,39 @@ window.__ModuleLoader__.load({
         "[data-snm-group]:focus-visible,[data-snm-add-group]:focus-visible,[data-snm-reset]:focus-visible{",
         "  outline:2px solid var(--dsw-alias-accent,#247bbf);outline-offset:1px;",
         "}",
+        // ── 侧栏入口对应的 main 页面（纯自有节点，不依赖宿主类名）──
+        "[data-snm-page]{height:100%;overflow:auto;box-sizing:border-box;padding:24px 28px;",
+        "  color:var(--dsw-alias-label-primary,#ccc);font-family:inherit;}",
+        "[data-snm-page-head]{display:flex;align-items:center;gap:10px;margin:0 0 6px;}",
+        "[data-snm-page-title]{margin:0;font-size:16px;line-height:24px;font-weight:600;}",
+        "[data-snm-page-count]{flex:none;padding:1px 8px;border-radius:999px;font-size:12px;",
+        "  border:1px solid var(--dsw-alias-border,rgba(128,128,128,.35));",
+        "  color:var(--dsw-alias-label-secondary,#888);}",
+        "[data-snm-page-hint]{margin:0 0 16px;font-size:12px;line-height:1.4;",
+        "  color:var(--dsw-alias-label-secondary,#888);}",
+        "[data-snm-page-list]{display:flex;flex-direction:column;gap:4px;max-width:640px;}",
+        "[data-snm-page-row]{display:flex;align-items:center;gap:10px;width:100%;box-sizing:border-box;",
+        "  min-height:36px;padding:7px 12px;border:1px solid transparent;border-radius:8px;",
+        "  background:transparent;color:inherit;font:inherit;font-size:14px;text-align:left;cursor:pointer;}",
+        "[data-snm-page-row]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.08));}",
+        "[data-snm-page-row]:focus-visible{outline:2px solid var(--dsw-alias-accent,#247bbf);outline-offset:1px;}",
+        "[data-snm-page-glyph]{flex:none;width:22px;height:22px;border-radius:50%;display:inline-flex;",
+        "  align-items:center;justify-content:center;font-size:12px;line-height:1;",
+        "  background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));",
+        "  color:var(--dsw-alias-label-secondary,#888);}",
+        "[data-snm-page-label]{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+        "[data-snm-page-group]{flex:none;font-size:11px;color:var(--dsw-alias-label-secondary,#888);}",
+        "[data-snm-page-badge]{flex:none;padding:1px 6px;border-radius:999px;font-size:11px;",
+        "  border:1px solid var(--dsw-alias-border,rgba(128,128,128,.35));",
+        "  color:var(--dsw-alias-label-secondary,#888);}",
+        '[data-snm-page-row][data-snm-page-hidden="1"]{opacity:.55;}',
+        "[data-snm-page-foot]{margin-top:10px;display:flex;gap:8px;max-width:640px;}",
+        "[data-snm-page-foot] button{margin:0;padding:6px 10px;cursor:pointer;font:inherit;font-size:12px;",
+        "  border:1px solid var(--dsw-alias-border,rgba(128,128,128,.35));border-radius:6px;",
+        "  background:transparent;color:var(--dsw-alias-label-secondary,#888);}",
+        "[data-snm-page-foot] button:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.08));}",
+        "[data-snm-page-foot] button:focus-visible{outline:2px solid var(--dsw-alias-accent,#247bbf);outline-offset:1px;}",
+        "[data-snm-page-empty]{margin:12px 0;font-size:13px;color:var(--dsw-alias-label-secondary,#888);}",
         // 屏读文本
         "[data-snm-sr]{position:absolute;width:1px;height:1px;margin:-1px;padding:0;",
         "  overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;}",
@@ -546,6 +664,7 @@ window.__ModuleLoader__.load({
       var navMo = null;
       var navNode = null;
       var lastFingerprint = "";
+      var lastSectionsSig = "";
       var rafId = 0;
       var cleanups = [];
 
@@ -617,6 +736,160 @@ window.__ModuleLoader__.load({
       }
       function clearReport(kind) {
         if (reported[kind]) delete reported[kind];
+      }
+
+      // ── 深链：打开设置并选中某个分区（三层降级）───────────────
+      // ① 设置弹窗的 shell store（sidebar.settings 条目注册时带的 store handle）
+      //    暴露 openSection(id)：一步「打开 + 选中」。create() 在 0.2.1 里被
+      //    settings-general 覆写成固定单例，所以直接 create() 拿到的就是 React
+      //    正在用的那个实例 —— 失败也只可能是不存在，不会污染状态。
+      // ② DOM 兜底：弹窗已在，按 label 命中 navCell 后 .click()（走宿主自己的 select）。
+      // ③ 都失败：齿轮旁提示，绝不静默。
+      function shellActionsOf() {
+        var entry = null;
+        try {
+          var list = ctx.slots.entriesOfSlot("sidebar.settings");
+          entry = list && list[0];
+        } catch (e) {
+          dbg("settings entry", e);
+        }
+        var handle = entry && entry.store;
+        if (!handle || typeof handle.create !== "function") return null;
+        try {
+          var instance = handle.create();
+          return instance && instance.actions ? instance.actions : null;
+        } catch (e2) {
+          dbg("settings store", e2);
+          return null;
+        }
+      }
+      function labelOfSection(id) {
+        for (var i = 0; i < sections.length; i++) if (sections[i].id === id) return sections[i].label;
+        return "";
+      }
+      // 按 data 属性线性查找 + label 兜底（不拼接选择器）
+      function clickNavCell(id) {
+        var nav = findNav();
+        if (!nav) return false;
+        var cells = navCells(nav);
+        var label = labelOfSection(id);
+        for (var i = 0; i < cells.length; i++) {
+          if (cells[i].getAttribute(DATA.id) === id) {
+            cells[i].click();
+            return true;
+          }
+        }
+        if (!label) return false;
+        for (var j = 0; j < cells.length; j++) {
+          if (rowLabel(cells[j]) === label) {
+            cells[j].click();
+            return true;
+          }
+        }
+        return false;
+      }
+      function failOpen() {
+        setNotice(t ? t("openFailed") : DICT.zh.openFailed);
+      }
+      function openSettingsSection(id) {
+        var sid = id === undefined || id === null ? "" : String(id);
+        if (!sid) return false;
+        var actions = shellActionsOf();
+        if (actions && typeof actions.openSection === "function") {
+          try {
+            actions.openSection(sid);
+            return true;
+          } catch (e) {
+            dbg("openSection", e);
+          }
+        }
+        // 没有 openSection：先只打开弹窗，再等分区渲染出来后点一下
+        var opened = false;
+        if (actions && typeof actions.open === "function") {
+          try {
+            actions.open();
+            opened = true;
+          } catch (e2) {
+            dbg("open settings", e2);
+          }
+        }
+        var attempts = 0;
+        (function retry() {
+          if (disposed) return;
+          if (clickNavCell(sid)) return;
+          if (!opened && !findNav()) {
+            if (attempts === 0) failOpen(); // 弹窗根本打不开：立刻报，别假装成功
+            return;
+          }
+          attempts++;
+          if (attempts <= 5) {
+            setTimeout(retry, 60);
+            return;
+          }
+          failOpen();
+        })();
+        return true;
+      }
+
+      // ── 侧栏入口的显隐（编辑模式里齿轮旁的开关）─────────────────
+      // 只摘「侧栏那一行」，main 页面始终留在册：layout 指向一个不存在的主面板
+      // 会直接抛错，而隐藏入口时用户可能正停在该页面上。
+      var entryRendered = false;
+      var entryDisposers = [];
+      function entryHidden() {
+        return state && state.hideEntry === true;
+      }
+      function disposeEntry() {
+        while (entryDisposers.length) {
+          var d = entryDisposers.pop();
+          try {
+            if (typeof d === "function") d();
+          } catch (e) {
+            dbg("entry dispose", e);
+          }
+        }
+      }
+      function renderEntry() {
+        entryDisposers.push(
+          ctx.slots.inject("sidebar.panellist", function () {
+            return ctx.slots.register(
+              {
+                name: "sidebar.panellist",
+                id: PANEL_ID,
+                order: 20,
+                locale: NS,
+                label: function () {
+                  return t ? t("panel") : DICT.zh.panel;
+                },
+              },
+              SettingsNavIcon,
+            );
+          }),
+        );
+      }
+      function syncEntry() {
+        var want = !entryHidden();
+        if (want === entryRendered) return; // 幂等：状态没变就不动 DOM，免得侧栏闪
+        disposeEntry();
+        entryRendered = false;
+        if (!want) return;
+        try {
+          renderEntry();
+          entryRendered = true;
+        } catch (e) {
+          // 宿主槽位拒绝注册时不能把异常甩进点击处理器里：退回「入口仍在」的状态
+          dbg("entry register", e);
+          report("entry", e, "entryFailed");
+        }
+      }
+      function setEntryHidden(hidden) {
+        var next = hidden === true;
+        if (entryHidden() === next) return;
+        state = cloneState(state);
+        state.hideEntry = next;
+        syncEntry();
+        publish();
+        persist();
       }
 
       // ── 样式注入 / 清理 ─────────────────────────────────────
@@ -761,10 +1034,17 @@ window.__ModuleLoader__.load({
         if (disposed) return;
         ensureStyles();
         sections = projectSections(ctx); // 永远先算，不看 DOM（P0）
+        // 入口页的行数据 = 这里的投影 + normalized state：两者都更新完再通知
+        var sig = sectionsSignature(sections);
+        var sigChanged = sig !== lastSectionsSig;
+        lastSectionsSig = sig;
         var nav = findNav();
         var mapped = nav ? markRows(nav) : 0;
         var total = nav ? navCells(nav).length : 0;
         state = normalizeState(state, knownIdsFrom(sections), sectionIds(sections));
+        if (sigChanged) publish();
+        // 入口显隐跟着 state 走：这里是唯一的注册/注销时机（含启动与恢复默认后）
+        syncEntry();
         if (!nav) return;
         // 尽力应用：认不全也要把认出来的排好，而不是整体不生效
         applyDom(nav);
@@ -809,6 +1089,7 @@ window.__ModuleLoader__.load({
           { op: "set", path: ["order"], value: payload.order },
           { op: "set", path: ["groups"], value: payload.groups },
           { op: "set", path: ["hidden"], value: payload.hidden },
+          { op: "set", path: ["hideEntry"], value: payload.hideEntry === true },
         ];
       }
       function persist() {
@@ -1636,6 +1917,143 @@ window.__ModuleLoader__.load({
         });
       }
 
+      // ── 侧栏入口图标（只有字形，不带外层 wrapper：行自身负责水平对齐）──
+      function SettingsNavIcon(props) {
+        var size = props && props.size ? props.size : 18;
+        return h(
+          "svg",
+          {
+            width: size,
+            height: size,
+            viewBox: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            strokeWidth: 2,
+            strokeLinecap: "round",
+            strokeLinejoin: "round",
+            "aria-hidden": "true",
+            focusable: "false",
+          },
+          h("path", { key: "l1", d: "M3 6h9" }),
+          h("circle", { key: "c1", cx: 16.5, cy: 6, r: 2.5 }),
+          h("path", { key: "l2", d: "M3 12h4" }),
+          h("circle", { key: "c2", cx: 11, cy: 12, r: 2.5 }),
+          h("path", { key: "l3", d: "M3 18h11" }),
+          h("circle", { key: "c3", cx: 18.5, cy: 18, r: 2.5 }),
+        );
+      }
+
+      // ── 侧栏入口页：列出全部分区，点一行直达设置 ───────────────
+      // 行数据来自 sync() 的 sections 投影，经 uiSubs 订阅刷新；
+      // 不自造分区列表，也不往设置弹窗的 children 里塞任何东西。
+      function SettingsNavPage(props) {
+        var tickState = react.useState(0);
+        var force = tickState[1];
+        var hiddenState = react.useState(false);
+        var showHidden = hiddenState[0];
+        var setShowHidden = hiddenState[1];
+        react.useEffect(function () {
+          uiSubs.push(force);
+          return function () {
+            var i = uiSubs.indexOf(force);
+            if (i >= 0) uiSubs.splice(i, 1);
+          };
+        }, []);
+        var tr =
+          t ||
+          function (key) {
+            return DICT.zh[key] || key;
+          };
+        var open =
+          props && typeof props.openSection === "function"
+            ? props.openSection
+            : function () {
+                return false;
+              };
+        var rows = flattenNav(sections, state);
+        var visible = [];
+        var hiddenCount = 0;
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].hidden && !showHidden) {
+            hiddenCount++;
+            continue;
+          }
+          visible.push(rows[i]);
+        }
+        var items = [];
+        for (var r = 0; r < visible.length; r++) {
+          var row = visible[r];
+          items.push(
+            h(
+              "button",
+              {
+                key: row.id,
+                type: "button",
+                "data-snm-page-row": "1",
+                "data-snm-page-id": row.id,
+                "data-snm-page-hidden": row.hidden ? "1" : "0",
+                onClick: (function (id) {
+                  return function () {
+                    open(id);
+                  };
+                })(row.id),
+              },
+              h("span", { key: "g", "data-snm-page-glyph": "1", "aria-hidden": "true" }, glyphOf(row.label)),
+              h("span", { key: "l", "data-snm-page-label": "1" }, row.label || row.id),
+              row.group ? h("span", { key: "gr", "data-snm-page-group": "1" }, row.group) : null,
+              row.hidden ? h("span", { key: "b", "data-snm-page-badge": "1" }, tr("hidden")) : null,
+            ),
+          );
+        }
+        var foot = [];
+        if (hiddenCount > 0) {
+          foot.push(
+            h(
+              "button",
+              {
+                key: "toggle-hidden",
+                type: "button",
+                onClick: function () {
+                  setShowHidden(!showHidden);
+                },
+              },
+              showHidden ? tr("hideHidden") : tr("showHidden"),
+            ),
+          );
+        }
+        if (visible.length === 0) {
+          foot.push(
+            h(
+              "button",
+              {
+                key: "retry",
+                type: "button",
+                onClick: function () {
+                  sync();
+                  publish();
+                },
+              },
+              tr("retry"),
+            ),
+          );
+        }
+        return h(
+          "div",
+          { "data-snm-page": "1" },
+          h(
+            "div",
+            { "data-snm-page-head": "1" },
+            h("h2", { "data-snm-page-title": "1" }, tr("panel")),
+            h("span", { "data-snm-page-count": "1" }, String(visible.length)),
+          ),
+          h("p", { "data-snm-page-hint": "1" }, tr("pageHint")),
+          visible.length === 0
+            ? h("p", { "data-snm-page-empty": "1" }, tr("empty"))
+            : h("div", { "data-snm-page-list": "1" }, items),
+          foot.length ? h("div", { "data-snm-page-foot": "1" }, foot) : null,
+        );
+      }
+
       // ── 齿轮按钮 ───────────────────────────────────────────
       function GearButton() {
         var tickState = react.useState(0);
@@ -1673,6 +2091,46 @@ window.__ModuleLoader__.load({
           },
           "⚙",
         );
+        // 侧栏入口开关：只在编辑模式出现，紧挨齿轮（用户要求「开关放到齿轮旁边」）
+        var off = entryHidden();
+        var entryLabel = t ? t("entry") : DICT.zh.entry;
+        var entryStateText = t ? (off ? t("entryOff") : t("entryOn")) : off ? DICT.zh.entryOff : DICT.zh.entryOn;
+        var entryTitle = t
+          ? off
+            ? t("entryHideHint")
+            : t("entryShowHint")
+          : off
+            ? DICT.zh.entryHideHint
+            : DICT.zh.entryShowHint;
+        var entryBtn = editing
+          ? h(
+              "button",
+              {
+                type: "button",
+                "data-snm-entry-toggle": "1",
+                "data-snm-entry-off": off ? "1" : "0",
+                "aria-pressed": off ? "true" : "false",
+                "aria-label": entryLabel + " · " + entryStateText,
+                title: entryTitle,
+                onClick: function () {
+                  setEntryHidden(!entryHidden());
+                },
+                style: {
+                  background: off ? "transparent" : "var(--dsw-alias-interactive-bg-secondary,rgba(128,128,128,.16))",
+                  color: off ? "var(--dsw-alias-label-secondary,#888)" : "inherit",
+                  border: "1px solid var(--dsw-alias-border,rgba(128,128,128,.35))",
+                  borderRadius: "6px",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  lineHeight: "1",
+                  padding: "5px 8px",
+                  whiteSpace: "nowrap",
+                  textDecoration: off ? "line-through" : "none",
+                },
+              },
+              entryLabel + " " + entryStateText,
+            )
+          : null;
         var hint = editing
           ? h(
               "span",
@@ -1725,6 +2183,7 @@ window.__ModuleLoader__.load({
           noticeEl,
           live,
           gearBtn,
+          entryBtn,
         );
       }
 
@@ -1750,6 +2209,26 @@ window.__ModuleLoader__.load({
           );
         });
       }, NS + ": gear");
+      // 侧栏插件栏入口在 syncEntry() 里按 hideEntry 动态注册/注销
+      // （顺序 20 排在「插件」(0) /「插件市场」/「自动化任务」(10) 之后）。
+      // 该入口对应的页面：没有它，layout.selectPanel 会抛
+      // `main panel "settings-nav" is not registered`。
+      // 页面始终在册，隐藏入口只摘侧栏那一行。
+      ctx.effect(function () {
+        return ctx.slots.inject("main", function () {
+          return ctx.slots.register(
+            {
+              name: "main",
+              key: PANEL_ID,
+              locale: NS,
+              inject: function () {
+                return { openSection: openSettingsSection };
+              },
+            },
+            SettingsNavPage,
+          );
+        });
+      }, NS + ": sidebar page");
 
       sync(); // 先用默认态标一次，随后异步拉真实排版
       loadState();
@@ -1761,6 +2240,7 @@ window.__ModuleLoader__.load({
           disposed = true;
           if (rafId && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
           rafId = 0;
+          disposeEntry(); // 侧栏入口是动态注册的，得自己摘
           if (noticeTimer) clearTimeout(noticeTimer);
           noticeTimer = null;
           while (cleanups.length) {
@@ -1810,6 +2290,7 @@ window.__ModuleLoader__.load({
     // 测试接缝：只暴露纯函数与文案表，供 node --test 直接调用
     exports.__test = {
       NS: NS,
+      PANEL_ID: PANEL_ID,
       DICT: DICT,
       buildCss: buildCss,
       createState: createState,
@@ -1820,6 +2301,9 @@ window.__ModuleLoader__.load({
       projectSections: projectSections,
       knownIdsFrom: knownIdsFrom,
       sectionIds: sectionIds,
+      flattenNav: flattenNav,
+      sectionsSignature: sectionsSignature,
+      glyphOf: glyphOf,
       isMissingEntry: isMissingEntry,
       looksLikeOurs: looksLikeOurs,
       looksLikeOurValue: looksLikeOurValue,

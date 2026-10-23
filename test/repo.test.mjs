@@ -128,3 +128,15 @@ test("安全：不得再用整份替换的写入口，且失败要能收敛", ()
   assert.ok(SRC.includes("nsResolved"), "缺少「命名空间未知 → 一个字都不写」的失败关闭守卫");
   assert.ok(SRC.includes("if (!isMissingEntry"), "降级重试必须按错误类型收敛，不能见错就换路");
 });
+
+test("host schema：写入用的每个字段都必须在 Config 里声明", () => {
+  // settings.update 会按 volatile Config 校验载荷：字段没声明 → 写被拒 → 用户
+  // 看到「保存失败」但排版其实改了，重启就丢。这条守卫盯着最容易漏的地方。
+  const host = read("index.js");
+  const payloadFields = [...SRC.matchAll(/path: \["([\w-]+)"\]/g)].map((m) => m[1]);
+  assert.ok(payloadFields.length >= 4, "payloadOps 字段解析异常：" + payloadFields.join(","));
+  for (const field of new Set(payloadFields)) {
+    assert.ok(host.includes(field + ":"), "index.js 的 Config 没有声明字段 " + field);
+  }
+  assert.ok(host.includes("hideEntry"), "侧栏入口开关没在 Config 里声明");
+});

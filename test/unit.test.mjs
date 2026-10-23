@@ -49,7 +49,7 @@ const ORDER = T.sectionIds(SECTIONS);
 test("createState：脏数据一律回退默认，不抛异常", () => {
   for (const bad of [null, undefined, 42, "x", [], { order: "nope", groups: {}, hidden: 1 }]) {
     const s = T.createState(bad);
-    assert.deepEqual(s, { version: 1, order: [], groups: [], hidden: [] });
+    assert.deepEqual(s, { version: 1, order: [], groups: [], hidden: [], hideEntry: false });
   }
   const s = T.createState({
     order: ["a", 1, "b"],
@@ -278,3 +278,121 @@ test("looksLikeOurs：schema 指纹必须三键齐全", () => {
   assert.equal(T.looksLikeOurs(null), false);
   assert.equal(T.looksLikeOurs({}), false);
 });
+
+// ── 侧栏入口页：行投影 ─────────────────────────────────────────
+test("flattenNav：未整理时按宿主 order 列出全部分区", () => {
+  const rows = T.flattenNav(SECTIONS, T.createState(null));
+  assert.deepEqual(
+    rows.map((r) => r.id),
+    ["general", "account", "models", "plugins"],
+    "空状态必须回落到宿主 order",
+  );
+  assert.deepEqual(
+    rows.map((r) => r.label),
+    ["通用", "账户", "模型", "插件"],
+  );
+  assert.ok(
+    rows.every((r) => r.hidden === false && r.group === ""),
+    "空状态不该带隐藏/抽屉标记",
+  );
+});
+
+test("flattenNav：抽屉成员紧跟抽屉连续展开，并带上抽屉名", () => {
+  const st = T.createState({
+    order: ["general", "g-1", "plugins"],
+    groups: [{ id: "g-1", name: "常用", items: ["models", "account"] }],
+  });
+  const rows = T.flattenNav(SECTIONS, st);
+  assert.deepEqual(
+    rows.map((r) => r.id),
+    ["general", "models", "account", "plugins"],
+  );
+  assert.equal(rows[1].group, "常用");
+  assert.equal(rows[2].group, "常用");
+  assert.equal(rows[0].group, "", "抽屉外的条目不该被标成组内");
+});
+
+test("flattenNav：隐藏标记透传，未知 id 被跳过，未落位分区追加到末尾", () => {
+  const st = T.createState({
+    order: ["ghost", "plugins"],
+    groups: [],
+    hidden: ["plugins", "also-gone"],
+  });
+  const rows = T.flattenNav(SECTIONS, st);
+  assert.ok(!rows.some((r) => r.id === "ghost"), "宿主不存在的 id 不该渲染");
+  assert.equal(rows[0].id, "plugins", "已落位的排在最前");
+  assert.equal(rows[0].hidden, true);
+  assert.deepEqual(
+    rows.map((r) => r.id),
+    ["plugins", "general", "account", "models"],
+    "未落位的按宿主 order 追加",
+  );
+});
+
+test("flattenNav：同一个 id 在 order 里出现两次也只渲染一行", () => {
+  const st = T.createState({ order: ["general", "general", "models"], groups: [] });
+  const rows = T.flattenNav(SECTIONS, st);
+  assert.deepEqual(
+    rows.map((r) => r.id),
+    ["general", "models", "account", "plugins"],
+  );
+});
+
+test("glyphOf：按码点取首字，中文与 emoji 都不会被截断", () => {
+  assert.equal(T.glyphOf("通用设置"), "通");
+  assert.equal(T.glyphOf("🤖 模型"), "🤖");
+  assert.equal(T.glyphOf(""), "?");
+  assert.equal(T.glyphOf(null), "?");
+});
+
+test("buildCss：侧栏入口页的选择器齐全", () => {
+  const css = T.buildCss();
+  for (const sel of [
+    "[data-snm-page]{",
+    "[data-snm-page-row]{",
+    "[data-snm-page-row]:focus-visible",
+    "[data-snm-page-glyph]",
+    "[data-snm-page-badge]",
+    "[data-snm-page-empty]",
+  ]) {
+    assert.ok(css.includes(sel), "CSS 缺少 " + sel);
+  }
+});
+
+test("侧栏入口 id：main 与 sidebar.panellist 必须用同一个 key", () => {
+  // layout 用 `entries("main").some(e => e.options.key === id)` 判定面板存在，
+  // sidebar 用 panellist 的 id 切过去 —— 两者一旦不一致就是点击抛错。
+  assert.equal(T.PANEL_ID, "settings-nav");
+  assert.ok(SRC.includes('"sidebar.panellist"'), "缺少侧栏入口注册");
+  assert.ok(SRC.includes('name: "main"'), "缺少 main 页面注册");
+  assert.ok(SRC.includes("key: PANEL_ID"), "main 注册必须带 key: PANEL_ID");
+  assert.ok(SRC.includes("id: PANEL_ID"), "panellist 注册必须带 id: PANEL_ID");
+});
+
+// ── 侧栏入口开关：hideEntry 要能存、能读、不误伤老数据 ──────────
+test("hideEntry：缺省为 false，只有严格 true 才算隐藏", () => {
+  assert.equal(T.createState(null).hideEntry, false);
+  assert.equal(T.createState({}).hideEntry, false, "老版本没有这个字段 → 显示");
+  assert.equal(T.createState({ hideEntry: true }).hideEntry, true, "重启后要能记住隐藏态");
+  assert.equal(T.createState({ hideEntry: 1 }).hideEntry, false, "脏值不当作隐藏，避免入口消失后找不回");
+  assert.equal(T.createState({ hideEntry: "true" }).hideEntry, false);
+});
+
+test("hideEntry：归一化与写盘都要带上，且不受 known id 域影响", () => {
+  const st = T.createState({ hideEntry: true, order: ["general", "ghost"] });
+  const known = { general: 1, account: 1 };
+  const normalized = T.normalizeState(st, known, ["general", "account"]);
+  assert.equal(normalized.hideEntry, true, "归一化不能把开关丢了");
+
+  const payload = T.serializeState(normalized, known);
+  assert.equal(payload.hideEntry, true);
+  assert.deepEqual(payload.order, ["general", "account"], "未知 id 被过滤，未落位分区按宿主顺序补齐");
+  // known 为空 = 拒绝写入，这条老规则不能被新字段绕过
+  assert.equal(T.serializeState(normalized, {}), null);
+});
+
+test("hideEntry：恢复默认后入口必须重新出现", () => {
+  assert.equal(T.createState({ hideEntry: true }).hideEntry, true);
+  assert.equal(T.createState(null).hideEntry, false, "恢复默认 = 侧栏入口重新显示");
+});
+
