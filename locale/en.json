@@ -1,0 +1,13 @@
+{
+  "meta": {
+    "title": "Settings Nav Manager",
+    "description": "Reorder, hide, and group the navigation tabs in the settings page."
+  },
+  "gear": "Edit navigation",
+  "gearExit": "Exit navigation editing",
+  "hidden": "Hidden",
+  "show": "Show",
+  "hide": "Hide",
+  "handle": "Drag to reorder",
+  "reset": "Reset to default"
+}

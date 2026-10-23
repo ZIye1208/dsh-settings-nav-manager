@@ -1,0 +1,46 @@
+{
+  "name": "dsh-settings-nav-manager",
+  "version": "1.0.0",
+  "private": false,
+  "license": "MIT",
+  "description": "DSH 设置页导航管理插件 —— 拖拽排序 · 显隐 · 抽屉收纳 · 持久化",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZIye1208/dsh-settings-nav-manager.git"
+  },
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4",
+    "@deepseek-ai/cosmokit": "~1.8.6",
+    "@standard-schema/spec": "^1.1.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    },
+    "compatibility": {
+      "dsh": ">=0.1.0-rc.6",
+      "node": ">=20.18",
+      "profiles": ["web", "desktop"]
+    }
+  }
+}
