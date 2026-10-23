@@ -498,6 +498,9 @@ window.__ModuleLoader__.load({
       var state = { version: 1, order: [], groups: [], hidden: [] };
       var sections = [];
       var revision;
+      // 实际用于写入的命名空间：默认 NS；若宿主把条目 id 改写（别名安装等），
+      // findNs() 会按 schema 指纹认领真实 id 并记在这里。
+      var nsId = NS;
       var groupSeq = 1;
       var t = null;
       var drag = null;
@@ -543,11 +546,43 @@ window.__ModuleLoader__.load({
         publish();
       }
       // 同一类故障只报一次，避免刷屏
-      function report(kind, err) {
+      function report(kind, err, msgKey) {
         if (reported[kind]) return;
         reported[kind] = 1;
         dbg(kind, err);
-        setNotice(t ? t("saveFailed") : DICT.zh.saveFailed);
+        var key = msgKey || "saveFailed";
+        var base = t ? t(key) : DICT.zh[key] || DICT.zh.saveFailed;
+        var reason = kind === "save" ? reasonOf(err) : "";
+        setNotice(reason ? base + "（" + reason + "）" : base);
+      }
+      // 把宿主/RPC 的错误压成一小段可读文本，方便用户直接截图反馈
+      function reasonOf(err) {
+        if (!err) return "";
+        if (typeof err === "string") return err.slice(0, 40);
+        var code = err.code || (err.error && err.error.code);
+        var msg = err.message || (err.error && err.error.message) || "";
+        var short = String(msg).split("\n")[0].slice(0, 40);
+        return code && short ? code + ": " + short : short || (code ? String(code) : "");
+      }
+      function okOf(res) {
+        // 网关把失败放在 { ok: false, error } 里返回，不会 reject —— 必须显式判断
+        if (res && typeof res === "object" && res.ok === false) return false;
+        return true;
+      }
+      // 客户端远程的返回是 { ok: true, value } / { ok: false, error } 信封。
+      // 直接当裸对象读（res.namespaces）会永远读到 undefined —— 1.0.x 的
+      //「重启就恢复默认」就是这么来的：每次启动都拿空状态覆盖自己。
+      function unwrapValue(res) {
+        if (res && typeof res === "object" && Object.prototype.hasOwnProperty.call(res, "ok")) {
+          if (res.ok === false) {
+            var e = res.error || {};
+            var err = new Error(e.message || "remote call rejected");
+            err.code = e.code;
+            throw err;
+          }
+          return res.value;
+        }
+        return res;
       }
       function clearReport(kind) {
         if (reported[kind]) delete reported[kind];
@@ -616,7 +651,7 @@ window.__ModuleLoader__.load({
         }
         var sameLen = cells.length === sections.length;
         var used = dict();
-        var complete = cells.length > 0;
+        var mappedCount = 0;
         for (var i = 0; i < cells.length; i++) {
           var cell = cells[i];
           var label = rowLabel(cell);
@@ -632,15 +667,15 @@ window.__ModuleLoader__.load({
           }
           if (id) {
             used[id] = 1;
+            mappedCount++;
             cell.setAttribute(DATA.row, "1");
             cell.setAttribute(DATA.id, id);
           } else {
             cell.removeAttribute(DATA.row);
             cell.removeAttribute(DATA.id);
-            complete = false;
           }
         }
-        return complete;
+        return mappedCount;
       }
 
       // ── 应用 order / groups / hidden / editing ─────────────────
@@ -690,25 +725,20 @@ window.__ModuleLoader__.load({
         buildTail(nav, counter);
       }
 
-      function applyEditingOnly(nav) {
-        nav.setAttribute(DATA.nav, "1");
-        nav.setAttribute(DATA.editing, editing ? "1" : "0");
-      }
-
       // ── 一次同步：投影 → 认行 → 归一化 → 应用 ──────────────────
       function sync() {
         if (disposed) return;
         ensureStyles();
         sections = projectSections(ctx); // 永远先算，不看 DOM（P0）
         var nav = findNav();
-        var ok = false;
-        if (nav) ok = markRows(nav);
+        var mapped = nav ? markRows(nav) : 0;
+        var total = nav ? navCells(nav).length : 0;
         state = normalizeState(state, knownIdsFrom(sections), sectionIds(sections));
         if (!nav) return;
-        if (ok) applyDom(nav);
-        else {
-          applyEditingOnly(nav);
-          if (sections.length) report("recognize", "row mapping incomplete");
+        // 尽力应用：认不全也要把认出来的排好，而不是整体不生效
+        applyDom(nav);
+        if (total > 0 && mapped < total && sections.length) {
+          report("recognize", "unmapped rows " + mapped + "/" + total, "recognizeFailed");
         }
       }
 
@@ -716,50 +746,90 @@ window.__ModuleLoader__.load({
       function remote() {
         return ctx && ctx.remote ? ctx.remote.settings : null;
       }
-      function writeOnce(payload) {
+      // 一次写入尝试：返回 { ok, res, error }，不抛异常
+      function writeVia(method, payload, ops) {
         var rm = remote();
-        var args = [NS, payload];
-        if (typeof revision === "number") args.push(revision);
-        return Promise.resolve(rm.update.apply(rm, args));
-      }
-      function persist() {
-        var rm = remote();
-        if (!rm || typeof rm.update !== "function") return Promise.resolve(false);
-        var payload = serializeState(state, knownIdsFrom(sections));
-        if (!payload) return Promise.resolve(false); // 分区未知 → 不写（防覆盖）
-        var wrote;
-        try {
-          wrote = writeOnce(payload);
-        } catch (e) {
-          wrote = Promise.reject(e);
+        if (!rm || typeof rm[method] !== "function") {
+          return Promise.resolve({ ok: false, error: new Error(method + " unavailable") });
         }
-        return wrote.then(
+        var args = method === "mutate" ? [nsId, ops] : [nsId, payload];
+        if (typeof revision === "number") args.push(revision);
+        var p;
+        try {
+          p = Promise.resolve(rm[method].apply(rm, args));
+        } catch (e) {
+          p = Promise.reject(e);
+        }
+        return p.then(
           function (res) {
-            clearReport("save");
-            revision = res && typeof res.revision === "number" ? res.revision : undefined;
-            return true;
+            if (!okOf(res)) {
+              return { ok: false, res: res, error: (res && res.error) || { message: method + " rejected" } };
+            }
+            return { ok: true, res: res };
           },
           function (err) {
-            // 冲突：重读一次后重放（本窗口的意图视为最新）
-            if (err && err.code === "SETTINGS_CONFLICT") {
-              return reloadRevision().then(function () {
-                return writeOnce(payload).then(
-                  function (res2) {
-                    clearReport("save");
-                    revision = res2 && typeof res2.revision === "number" ? res2.revision : undefined;
-                    return true;
-                  },
-                  function (err2) {
-                    report("save", err2);
-                    return false;
-                  },
-                );
-              });
-            }
-            report("save", err);
-            return false;
+            return { ok: false, error: err };
           },
         );
+      }
+      // 路径式 ops：与宿主设置页自己写表单的方式一致
+      function payloadOps(payload) {
+        return [
+          { op: "set", path: ["order"], value: payload.order },
+          { op: "set", path: ["groups"], value: payload.groups },
+          { op: "set", path: ["hidden"], value: payload.hidden },
+        ];
+      }
+      function persist() {
+        var payload = serializeState(state, knownIdsFrom(sections));
+        if (!payload) return Promise.resolve(false); // 分区未知（面板没开）→ 不写，防覆盖
+        var ops = payloadOps(payload);
+        // 三条路都落在宿主的同一个写入口，但校验层次不同：update 走合并、
+        // replace 走整体替换、mutate 走路径校验。前一条被拒就换下一条。
+        return writeVia("update", payload).then(function (r1) {
+          if (r1.ok) return settleOk(r1.res);
+          dbg("update rejected", r1.error);
+          if (isConflict(r1.error)) {
+            return reloadRevision().then(function () {
+              return writeVia("update", payload).then(function (r1b) {
+                if (r1b.ok) return settleOk(r1b.res);
+                dbg("update retry rejected", r1b.error);
+                return tryFallbacks(payload, ops, r1b.error);
+              });
+            });
+          }
+          return tryFallbacks(payload, ops, r1.error);
+        });
+      }
+      function tryFallbacks(payload, ops, firstError) {
+        return writeVia("replace", payload).then(function (r2) {
+          if (r2.ok) return settleOk(r2.res);
+          dbg("replace rejected", r2.error);
+          return writeVia("mutate", payload, ops).then(function (r3) {
+            if (r3.ok) return settleOk(r3.res);
+            dbg("mutate rejected", r3.error);
+            report("save", r3.error || firstError);
+            return false;
+          });
+        });
+      }
+      function settleOk(res) {
+        clearReport("save");
+        var view;
+        try {
+          view = unwrapValue(res) || {};
+        } catch (e) {
+          view = {};
+        }
+        revision = typeof view.revision === "number" ? view.revision : undefined;
+        if (notice && reported.save) {
+          reported.save = 0;
+          setNotice("");
+        }
+        return true;
+      }
+      function isConflict(err) {
+        return !!err && (err.code === "SETTINGS_CONFLICT" || (err.error && err.error.code === "SETTINGS_CONFLICT"));
       }
       function reloadRevision() {
         var rm = remote();
@@ -769,7 +839,7 @@ window.__ModuleLoader__.load({
             return rm.describe();
           })
           .then(function (res) {
-            var ns = findNs(res);
+            var ns = findNs(unwrapValue(res) || {});
             revision = ns && typeof ns.revision === "number" ? ns.revision : undefined;
             return revision;
           })
@@ -779,11 +849,29 @@ window.__ModuleLoader__.load({
             return undefined;
           });
       }
+      // 我们的字段指纹：schema 里同时有这四个键，基本只可能是本插件
+      function looksLikeOurs(entry) {
+        var schema = entry && entry.schema;
+        var fields = (schema && (schema.dict || schema.properties)) || null;
+        if (!fields) return false;
+        return "order" in fields && "groups" in fields && "hidden" in fields;
+      }
       function findNs(res) {
         var arr = res && res.namespaces;
         if (!Array.isArray(arr)) return null;
         for (var i = 0; i < arr.length; i++) {
-          if (arr[i] && arr[i].ns === NS) return arr[i];
+          if (arr[i] && arr[i].ns === NS) {
+            nsId = NS;
+            return arr[i];
+          }
+        }
+        // 条目 id 被别名/前缀改写时，按 schema 指纹认领自己的命名空间
+        for (var j = 0; j < arr.length; j++) {
+          if (arr[j] && looksLikeOurs(arr[j])) {
+            nsId = String(arr[j].ns);
+            dbg("namespace alias", NS + " -> " + nsId);
+            return arr[j];
+          }
         }
         return null;
       }
@@ -795,7 +883,9 @@ window.__ModuleLoader__.load({
             return rm.describe();
           })
           .then(function (res) {
-            var ns = findNs(res);
+            var view = unwrapValue(res) || {};
+            var ns = findNs(view);
+            if (!ns) dbg("namespace missing", "settings.describe 里没有 " + NS);
             state = createState(ns && ns.value);
             revision = ns && typeof ns.revision === "number" ? ns.revision : undefined;
             updateGroupSeq();
@@ -805,6 +895,7 @@ window.__ModuleLoader__.load({
             dbg("describe", err);
             state = createState(null);
             revision = undefined;
+            updateGroupSeq();
             sync();
           });
       }

@@ -38,42 +38,80 @@
     if (!cond) throw new Error(msg);
   }
 
-  // ── 宿主 settings 远端（带 revision + 冲突语义）──────────────
-  function makeStore(initial, revision) {
+  // ── 宿主 settings 远端 ───────────────────────────────────────
+  // 关键：宿主把失败放在 { ok: false, error } 里「正常返回」，不 reject。
+  // 假实现必须照这个契约来，否则测不出「把失败当成功」这类 bug。
+  function makeStore(initial, revision, opts) {
+    opts = opts || {};
     var st = {
       value: initial ? clone(initial) : null,
       revision: typeof revision === "number" ? revision : 1,
       writes: [],
       attempts: [],
       failNext: null,
+      rejectMethod: opts.rejectMethod || null,
+      rejectAll: !!opts.rejectAll,
+      rejectCode: opts.rejectCode || "gateway/internal",
+      rejectMessage: opts.rejectMessage || "rejected",
+      aliasNs: opts.aliasNs || null,
+      schema: opts.schema || null,
     };
     st.describe = function () {
-      return {
-        writable: true,
-        hasDocument: true,
-        namespaces: [
-          { ns: "settings-nav-manager", value: st.value ? clone(st.value) : undefined, revision: st.revision },
-        ],
-      };
+      var nsName = st.aliasNs || "settings-nav-manager";
+      var view = { ns: nsName, revision: st.revision };
+      if (st.value) view.value = clone(st.value);
+      if (st.schema) view.schema = clone(st.schema);
+      // 真实契约：客户端远程统一返回 { ok, value } 信封
+      return { ok: true, value: { writable: true, hasDocument: true, namespaces: [view] } };
     };
-    st.update = function (ns, patch, expected) {
-      st.writes.push(clone(patch));
-      st.attempts.push({ expected: expected });
+    function nsAccepted(ns) {
+      var expected = st.aliasNs || "settings-nav-manager";
+      return ns === expected;
+    }
+    function settle(method, expected, build, ns) {
+      st.attempts.push({ method: method, expected: expected, ns: ns });
+      if (!nsAccepted(ns)) {
+        return Promise.resolve({
+          ok: false,
+          error: { code: "gateway/internal", message: 'No configurable plugin entry "' + ns + '"' },
+        });
+      }
+      if (st.rejectAll || st.rejectMethod === method) {
+        return Promise.resolve({ ok: false, error: { code: st.rejectCode, message: st.rejectMessage } });
+      }
       if (st.failNext) {
         var f = st.failNext;
         st.failNext = null;
-        var err = new Error(f.message || "boom");
-        if (f.code) err.code = f.code;
-        return Promise.reject(err);
+        return Promise.resolve({ ok: false, error: { code: f.code || "gateway/internal", message: f.message || "boom" } });
       }
       if (typeof expected === "number" && expected !== st.revision) {
-        var ce = new Error("settings namespace changed");
-        ce.code = "SETTINGS_CONFLICT";
-        return Promise.reject(ce);
+        return Promise.resolve({ ok: false, error: { code: "SETTINGS_CONFLICT", message: "revision mismatch" } });
       }
-      st.value = clone(patch);
+      st.value = build();
       st.revision++;
-      return Promise.resolve({ ns: ns, value: clone(patch), revision: st.revision });
+      return Promise.resolve({
+        ok: true,
+        value: { ns: st.aliasNs || "settings-nav-manager", value: clone(st.value), revision: st.revision },
+      });
+    }
+    st.update = function (ns, patch, expected) {
+      return settle("update", expected, function () {
+        return clone(patch);
+      }, ns);
+    };
+    st.replace = function (ns, patch, expected) {
+      return settle("replace", expected, function () {
+        return clone(patch);
+      }, ns);
+    };
+    st.mutate = function (ns, ops, expected) {
+      return settle("mutate", expected, function () {
+        var next = clone(st.value) || { version: 1, order: [], groups: [], hidden: [] };
+        (ops || []).forEach(function (op) {
+          if (op && op.op === "set" && op.path && op.path.length === 1) clone(op.value) && (next[op.path[0]] = clone(op.value));
+        });
+        return next;
+      }, ns);
     };
     return st;
   }
@@ -551,6 +589,62 @@
   });
 
   scenarios.push({
+    name: "命名空间被别名改写时，按 schema 认领后仍能写入",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3, {
+        aliasNs: "@local/dsh-settings-nav-manager",
+        schema: { type: "object", dict: { version: {}, order: {}, groups: {}, hidden: {} } },
+      });
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var cell = cellBySection("models");
+      var r = cell.getBoundingClientRect();
+      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      await sleep(220);
+      var w = env.store.value || {};
+      assert((w.hidden || []).indexOf("models") >= 0, "没认领到真实命名空间：" + JSON.stringify(w.hidden));
+      var used = env.store.attempts.map(function (a) {
+        return a.ns;
+      });
+      assert(
+        used[used.length - 1] === "@local/dsh-settings-nav-manager",
+        "写入仍打在假设的 id 上：" + used.join(","),
+      );
+      return "写入 ns=" + used[used.length - 1];
+    },
+  });
+
+  scenarios.push({
+    name: "宿主用 {ok:false} 拒写时不能当成功，并换路重试",
+    oldFails: true,
+    run: async function () {
+      // 只拒 update（模拟宿主那侧对这条写入口的拒绝），replace 仍然可用
+      env.store = makeStore(SAVED, 3, {
+        rejectMethod: "update",
+        rejectCode: "gateway/internal",
+        rejectMessage: 'No configurable plugin entry "settings-nav-manager"',
+      });
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var cell = cellBySection("models");
+      var r = cell.getBoundingClientRect();
+      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      await sleep(200);
+      var w = env.store.value || {};
+      assert((w.hidden || []).indexOf("models") >= 0, "分路重试后仍未写进去：" + JSON.stringify(w.hidden));
+      var methods = env.store.attempts.map(function (a) {
+        return a.method;
+      });
+      assert(methods.indexOf("update") >= 0 && methods.indexOf("replace") >= 0, "没有换路重试：" + methods.join(","));
+      assert(!document.querySelector("[data-snm-notice]"), "最终写成功了却还留着告警");
+      return "路径=" + methods.join("→");
+    },
+  });
+
+  scenarios.push({
     name: "持久化失败要可见（齿轮旁提示）",
     oldFails: true,
     run: async function () {
@@ -558,7 +652,8 @@
       applyFresh();
       await openPanel();
       await enterEditing();
-      env.store.failNext = { message: "No configurable plugin entry" };
+      env.store.rejectAll = true;
+      env.store.rejectMessage = 'No configurable plugin entry "settings-nav-manager"';
       var cell = cellBySection("general");
       var r = cell.getBoundingClientRect();
       clickAt(cell, r.right - 10, r.top + r.height / 2);

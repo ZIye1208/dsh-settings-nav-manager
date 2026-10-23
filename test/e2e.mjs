@@ -33,12 +33,17 @@ function log(s) {
 async function prepare() {
   await mkdir(HARNESS, { recursive: true });
   await writeFile(join(HARNESS, "under-test.js"), await readFile(join(ROOT, "client.js"), "utf8"), "utf8");
+  // 基线用「初始提交」（对外的 1.0.0），而不是 HEAD —— 否则 A/B 变成跟上一版自己比
+  const baseRef =
+    process.env.BASE_REF ||
+    execFileSync("git", ["rev-list", "--max-parents=0", "HEAD"], { cwd: ROOT, encoding: "utf8" }).trim().split("\n")[0];
   let legacy;
   try {
-    legacy = execFileSync("git", ["show", "HEAD:client.js"], { cwd: ROOT, encoding: "utf8" });
+    legacy = execFileSync("git", ["show", baseRef + ":client.js"], { cwd: ROOT, encoding: "utf8" });
   } catch (e) {
-    throw new Error("无法从 git HEAD 取旧版 client.js：" + e.message);
+    throw new Error("无法从基线 " + baseRef + " 取 client.js：" + e.message);
   }
+  log("基线版本: " + baseRef.slice(0, 7) + "（初始提交）");
   await writeFile(join(HARNESS, "legacy.js"), legacy, "utf8");
 }
 

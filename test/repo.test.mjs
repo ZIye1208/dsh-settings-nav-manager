@@ -93,6 +93,15 @@ test("健壮性：拖拽中断与冲突处理的关键代码在", () => {
   assert.ok(SRC.includes("if (!known") || SRC.includes("countKeys(known) === 0"), "缺少「分区未知不裁剪」的守卫");
 });
 
+test("健壮性：必须按 { ok, value } 信封解包远程返回", () => {
+  // 客户端远程把失败放在 { ok:false, error } 里正常返回；当裸对象读会永远拿到
+  // undefined，表现为「重启就恢复默认」。这条断言就是防止它被改回去。
+  assert.ok(SRC.includes("function unwrapValue"), "缺少信封解包");
+  assert.ok(SRC.includes("res.ok === false"), "没有显式判断 ok");
+  const unwrapped = (SRC.match(/unwrapValue\(/g) || []).length;
+  assert.ok(unwrapped >= 4, "解包点太少（define + describe + reloadRevision + 写入回执），实际 " + unwrapped);
+});
+
 test("无障碍：齿轮与抽屉头带可访问名与键盘语义", () => {
   assert.ok(SRC.includes('"aria-pressed"'), "齿轮缺 aria-pressed");
   assert.ok(SRC.includes('"aria-label"'), "缺 aria-label");
