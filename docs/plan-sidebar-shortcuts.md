@@ -1,6 +1,6 @@
 # 侧栏设置快捷入口 — 实施方案（阶段 1 · 阶段 2）
 
-> 状态：**阶段 1 已实现（v1.1.0 → v1.2.0 加入入口开关 → v1.2.1 按评审返工）**；阶段 2 设计完成、未开工
+> 状态：**阶段 1 已实现（v1.1.0 → v1.2.0 加入入口开关 → v1.2.1 按评审返工）**；阶段 2 设计完成、**前置实证已通过（§3.6 Go）**、未开工
 > 目标版本：1.1.0（阶段 1 ✅）→ 1.2.0（入口开关 ✅）→ 1.2.1（A+B 返工 ✅）→ 1.3.0（阶段 2）
 > 适用宿主：DSH 0.2.1-rc.2 桌面端（`dsh.compatibility.dsh = ">=0.2.1-rc.2 <0.3.0"`）
 > 关联需求：把设置页的页签以快捷方式放到主界面侧栏，点击直接打开对应设置分区；支持单独标记某几个页签。
@@ -37,6 +37,7 @@
 | 分区清单唯一权威：`settings.section` 槽条目 | 插件现有 `projectSections()` `client.js:178-208` | 不自造分区列表 |
 | 不能往别人的 children 里塞槽位 | `dsh-client-ui-renderer/lib/client.js:342-360` `SlotOwnershipError` | **绝不改 `sidebar.settings` 的 children**，只注册自己的 `main` + `sidebar.panellist` |
 | `slots.register()` 返回 disposer，绑定调用方 fiber | `renderer:1813` `return this.ctx.effect(() => this._register(...))` | 阶段 2 动态注册与卸载可行 |
+| React **18.3.1**，根容器 `#root`，挂载用 `createRoot(container)` | `dsh-web-frontend/.../index-CN7NIWNw.js` 内 `getElementById("root")` → `uiRenderer.mount`；`renderer client.js:1850-1857` | document 捕获阶段先于 React 的 `onClick` → 拦截可行（§3.6 已实证） |
 
 结论：阶段 1 走标准契约（低风险）；阶段 2 必须「动态注册 panellist 行 + 捕获阶段拦截点击」，这是唯一能保持原生外观的路径。
 
@@ -156,7 +157,7 @@ function openSettingsSection(id) {
 | 层 | 做法 |
 |---|---|
 | 定位父行 | 图标组件 `ref.current.closest('button[class*="panelRow"]')` 打 `data-snm-pin="<sectionId>"`（不猜哈希类名全称，只做包含匹配；匹配不到就只标图标本身，图标点击仍有效） |
-| 拦截 | `document.addEventListener("click", handler, true)`，命中 `[data-snm-pin]` 时 `e.preventDefault(); e.stopPropagation(); openSettingsSection(id)`。React 监听器挂在 `#root` 容器上，document 捕获阶段先于它执行，因此 `selectPanel` 不会触发 |
+| 拦截 | `document.addEventListener("click", handler, true)`，命中 `[data-snm-pin]` 时 `e.preventDefault(); e.stopPropagation(); openSettingsSection(id)`。React 监听器挂在 `#root` 容器上，document 捕获阶段先于它执行，因此 `selectPanel` 不会触发（**已实证，见 §3.6**） |
 | 兜底 | 同时为每个 pin id 注册极简 `main` 页（「该分区已在设置中打开」+ 返回按钮），只为在极端路径（如布局恢复）不触发 `hasMainPanel` 抛错 |
 | 失败降级 | 若父行定位失败（宿主改类名），退回「把图标本身做成可点击」；若 event 顺序不符合预期，退回备选 A（见 §3.7） |
 
@@ -188,6 +189,8 @@ const Config = z.object({
 - **pinned 上限 5 个**。`panelList` 是 `flex:none`，固定再多会把下面的会话列表挤扁；到限时给 `setNotice`，不静默截断。
 - **隐藏分区不能固定**：`togglePinned` 遇到 `hidden` 里的 id 直接拒绝并提示；已经固定的分区被隐藏时，自动取消固定。
 - **分区消失**（插件卸载）：`serializeState` 过滤 + 动态注册管理器按 `known` 重建，行自动消失。
+- **与入口开关互不干扰**：1.2.0 的 `hideEntry`（隐藏「设置导航」侧栏入口）与 `pinned` 是两件事 —— 隐藏入口**不**取消固定，固定行消失只由「取消固定 / 分区消失 / 停用插件」触发。
+- **同一份 state 写盘，字段不能互相覆盖**：`serializeState` / `payloadOps` 必须每次同时带上 `hideEntry` 与 `pinned`（1.2.0 就是在这条上踩过：只写部分字段导致另一字段被清空）。
 
 ### 3.4 动态注册管理器
 
@@ -222,14 +225,53 @@ function rebuildPins() {
 | 设置弹窗内行尾 ☆ | 阶段 2.1（可选） | 需向 React 管理的 `navCell` 追加子节点，有 reconciliation 风险，等主入口稳定后再评估 |
 | 右键设置行 → 「固定到侧栏」 | v3 候选 | 走现有 `onClickCapture` 委托，成本中等 |
 
-### 3.6 事件顺序的实证（开工第一步）
+### 3.6 事件顺序的实证（已完成 · 结论 Go）
 
-这是整份方案里**唯一没有实测证据**的环节，必须先做 spike 再写产品代码：
+**结论：Go。** 2026-10-24 在真实 React 18.3.1 上跑完 10/10 断言，宿主的挂载点也已从 `app.asar` 取证，机制成立。本节的三张表是实现阶段的**契约**，不是背景介绍。
 
-1. 构造一个最小 HTML：一层 `#root`，React 18 渲染 `<button onClick=...>`，document 捕获监听器 `stopPropagation`。
-2. 用本机 Chrome（需一次性 `danger-full-access` 审批，沙箱内 Chrome 启动即死）加载，点按钮，确认 `onClick` 没有被调用。
-3. 通过后，再在真实侧栏上验证：点击固定行 → 设置打开、主面板未切换、控制台无 `layout.selectPanel` 报错。
-4. 不通过 → 立刻切备选 A（§3.7），方案文档同步修订。
+#### 3.6.1 宿主侧取证（机制成立的前提）
+
+| 事实 | 证据 |
+|---|---|
+| 宿主 React 版本 = **18.3.1** | `dsh-web-frontend/dist/assets/index-CN7NIWNw.js` 内 `version:"18.3.1"` |
+| React 根容器是 **`#root`** | 同文件启动段：`const e = document.getElementById("root"); if (e === null) throw new Error("web app: missing #root"); const t = new TZ(e)` → `new TZ(e)` 末尾 `uiRenderer.mount(this.container)` |
+| 真正挂载调用是 `createRoot(container)` | `@deepseek-ai/dsh-client-ui-renderer/lib/client.js:1850-1857`（带 boot 时走 `hydrateRoot`，否则 `createRoot`） |
+| 推论 | React 18 把事件监听器绑在这个容器上，所以 `document` 的**捕获阶段始终先于** React 的 `onClick` |
+
+#### 3.6.2 实证结果（spike 10/10 PASS）
+
+产物：`C:\Users\Administrator\Desktop\gz\spike-events\{spike.html, react.js, react-dom.js, dom3.txt}`（本机 18.3.1 UMD，离线可重跑；`--dump-dom` 抓结果，`virtual-time-budget` 会提前截断 rAF，改用 `setTimeout` + `flushSync`）。
+
+| 断言 | 实测值 |
+|---|---|
+| T1 对照组：不拦截点行 → React `onClick` 执行、主面板被切走 | `activePanel=snm-pin-models`，日志 `react.onClick → selectPanel(...)` |
+| T2 拦截后 React `onClick` **未执行** | 只有 `doc.capture → intercepted → stopPropagation → openSettings(models)` |
+| T2 拦截后主面板**未切换** | `activePanel=conversation` |
+| T2 设置被打开且选中正确分区 | `opened=models` |
+| T3 监听器在点击前一刻才注册，也能拦住 | 同 T2 |
+| T4 非固定行不受影响，仍正常切面板 | `activePanel=insight` |
+| T5 连点 3 次不抛错、每次都开设置、面板始终未切 | `opened=models,models,models`，`activePanel=conversation` |
+
+#### 3.6.3 实现约束（照着写，别自作聪明）
+
+1. 监听必须挂 `document` 且 `capture: true` —— 冒泡阶段无效（T2 与 T3 已对比证明）。
+2. 判定用 `event.target.closest('button[class*="panelRow"]')` 再读 `data-snm-pin`；不猜哈希类名全称，点在图标/文字上同样命中。
+3. 顺序固定为 `preventDefault()` → `stopPropagation()` → `openSettingsSection(id)`。**不要** `stopImmediatePropagation`（会误伤宿主自己的 document 委托）。
+4. 拦截器必须幂等：`rebuildPins()` 重建时**不得重复** `addEventListener`；模块级只注册一个 `clickHandler`，卸载时 `removeEventListener`。
+5. `openSettingsSection` 失败必须 `setNotice(t("openFailed"))`，禁止静默 —— 否则用户看到的是“点了没反应”。
+6. 兜底 `main` 页不能省（§3.2）：布局恢复、深链极端路径仍会走 `selectPanel`。
+7. 键盘激活（Enter / Space）产生的就是同一个 `click`，天然被覆盖；**不要**额外拦 `keydown`，否则会和设置页自己的快捷键打架。
+
+#### 3.6.4 边界（这套实证覆盖不到什么）
+
+- 合成 click（`dispatchEvent`）在 Chromium 里走完整传播路径，故结论对真实点击成立；但**不覆盖**「宿主未来把切换改到 `pointerdown`/`mousedown`」这类变化。
+- 若某天真改成指针按下即切换，本方案失效 → 触发 §3.7 备选 A，同时本插件必须在 CHANGELOG 里标注不兼容版本。
+
+#### 3.6.5 未闭环的一项（阶段 2 实现时补，不得省略）
+
+「在**真实**侧栏点固定行」这一步此刻做不了 —— 固定行要等实现之后才存在。曾尝试起独立端口的临时 web 实例来验，被 `EPERM: rmSync ...\.dsh\profiles\web\.dsh-module-fallback` 挡住，而 `profiles\web` 是禁碰区，不碰。
+
+改为在阶段 2 第一轮 e2e 内补验，断言写成：真实侧栏 + `selectPanel` 桩 + 拦截器 → 点击固定行后 ① 主面板 activePanel 不变 ② 设置被打开 ③ 无 `layout.selectPanel` 抛错。**这条不过，任务 9 不算完成。**
 
 ### 3.7 备选 A：底部操作区（不拦截点击）
 
@@ -239,7 +281,7 @@ function rebuildPins() {
 |---|---|---|
 | 契约清洁度 | 依赖 DOM 定位 + document 监听 | 纯 slot 契约 |
 | 位置 | 插件这栏（符合原始需求） | 侧栏底部，设置齿轮旁边 |
-| 失败概率 | ~15% | ~5% |
+| 失败概率 | **~4%**（事件顺序已实证，残下 DOM 定位与宿主改指针事件） | ~5% |
 | 上限 | 5 个 | 3~4 个（横向空间） |
 
 ### 3.8 阶段 2 验收
@@ -263,14 +305,14 @@ function rebuildPins() {
 | 2 | 阶段 1 `openSettingsSection` 三层降级 | 1 | 1.0h | 真机点行能开设置 |
 | 3 | 阶段 1 页面组件 + 样式 + 注册两槽 | 1,2 | 2.0h | 侧栏入口 + 页面可用 |
 | 4 | 阶段 1 真机回归 + CHANGELOG + 版本 1.1.0 | 3 | 1.0h | 可发布 ✅ |
-| 5 | **阶段 2 事件顺序 spike**（§3.6） | — | 0.5h | Go / No-Go 结论 |
+| 5 | **阶段 2 事件顺序 spike**（§3.6） | — | 0.5h | ✅ **Go**（10/10 实证，React 18.3.1 + `#root` 挂载点已取证） |
 | 6 | schema `pinned` + normalize/serialize + 单测 | 5 | 1.0h | 写盘不丢字段 |
 | 7 | 页面 ☆ 按钮 + 上限/隐藏冲突规则 | 6 | 1.5h | 能标记 |
 | 8 | 动态注册管理器 + 徽标图标 + 兜底页 | 5,7 | 2.0h | 侧栏出现固定行 |
 | 9 | 点击拦截 + 卸载清理 | 8 | 1.5h | 直连打开 |
 | 10 | 真机回归 + e2e + CHANGELOG + 版本 1.3.0 | 9 | 1.5h | 可发布 |
 
-合计约 **13 小时**（阶段 1 约 5h，阶段 2 约 8h）。任务 5 是关卡：不通过就切 §3.7 备选 A，任务 7~9 相应减 ~1h（不需要拦截与兜底页）。
+合计约 **12.5 小时**（阶段 1 约 5h，阶段 2 约 7.5h，任务 5 已完成）。任务 9 的收尾条件是 §3.6.5 那条真实侧栏 e2e 断言；若 §3.6.3 任一约束在实现中无法满足，立刻切 §3.7 备选 A，任务 7~9 相应减 ~1h（不需要拦截与兜底页）。
 
 ---
 
@@ -280,10 +322,10 @@ function rebuildPins() {
 |---|---|
 | 单元（`test/unit.test.mjs`） | `flattenNav`：未整理=宿主顺序、抽屉成员连续展开、组内与顶层不重复、隐藏标记、未知 id 不丢；`pinned`：去重、上限、隐藏拒绝、known 为空不裁剪 |
 | 仓库（`test/repo.test.mjs`） | 现有 DICT↔locale 一致性自动覆盖新键；新增一条「`Config` 声明包含 `pinned`」断言，防止 schema 与 client 漂移 |
-| e2e（`test/e2e.mjs`，需 Chrome） | 主题 1：页面渲染 N 行、点行调用注入的 `openSection` 桩；主题 2：固定后出现 panellist 条目、注销后消失（用 harness 的 slots 桩） |
+| e2e（`test/e2e.mjs`，需 Chrome） | 主题 1：页面渲染 N 行、点行调用注入的 `openSection` 桩；主题 2：固定后出现 panellist 条目、注销后消失（用测试台 slots 桩）；主题 3（**§3.6.5 必做**）：真实侧栏行 + `selectPanel` 桩 + 拦截器 → 点固定行后 activePanel 不变、设置打开、无 `layout.selectPanel` 抛错 |
 | 真机手动 | §2.5 六条 + §3.8 八条，逐条打勾后才发版 |
 
-注意：`test/harness` 目前是 DOM 桩，阶段 1 的页面组件需要 React 才能跑；e2e 用 `react-dom/server` 只做「标记行渲染数量」这类静态断言，交互断言留在真机清单里，避免 e2e 变成维护负担。
+注意：测试台已在 1.2.1 的 A1 档重构成「宿主外壳 + 真 React 挂载」（`mounts` 按 key 分桶、独立 hook 槽位、`env.shell.dead` 模拟布局失联），所以**交互断言可以进 e2e**，不再局限于 `react-dom/server` 的静态渲染；但真机清单仍要人工过，e2e 只保证机制。
 
 ---
 
@@ -292,7 +334,7 @@ function rebuildPins() {
 | # | 风险 | 概率 | 影响 | 缓解 | 验证方式 |
 |---|---|---|---|---|---|
 | 1 | `store.create().create` 半内部 API 被 0.2.2+ 改动 | 30% | 深链失效 | 三层降级；兼容区间锁 `<0.3.0`；升级时必跑 §2.5 | 版本升级回归 |
-| 2 | React 事件顺序与预期不符 | 15% | 点击仍切面板 | 任务 5 spike 先验；不通过切备选 A | spike + 真机 |
+| 2 | React 事件顺序与预期不符 | **~4%**（已实证） | 点击仍切面板 | §3.6 已证：document 捕获 + `stopPropagation` 可切断 `#root` 上的 React `onClick`；残下风险是宿主改用指针事件触发切换 | spike（已完成）+ 真机 |
 | 3 | 宿主把 `panelRow` 类名重构 | 10% | 定位不到父行 | 退回只标图标；图标仍可点击 | 真机点图标 |
 | 4 | `settings.section` 首次渲染未注册完 | 中 | 页面/条目为空 | `sync()` 指纹 `publish()` + 空态重试 | 冷启动真机 |
 | 5 | `publish` 过频导致重渲染 | 低 | 卡顿 | 指纹比较，只在 id/order/label 真变时触发 | devtools Performance |
