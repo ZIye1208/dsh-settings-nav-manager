@@ -122,6 +122,8 @@ dsh plugin --profile <web|desktop> remove dsh-settings-nav-manager
 
 写入前过滤非法元素；读取任何异常一律回退默认值，不报错。
 
+命名空间按条目 id 精确匹配。若宿主把条目 id 改写成别名（`@local/...` 之类），插件会尝试认领**唯一**一个「schema 指纹 + 值形状都吻合」的命名空间；只要候选不唯一或值形状不符，就**一个字都不写**并提示——宁可这次没保存，也不赌一个命名空间去覆盖别人的配置。
+
 > **命名空间必须等于插件条目 id。** 宿主的 `settings.update()` 用 `entries().find(row => row.options.id === ns)` 定位配置项，两者不一致会抛 `No configurable plugin entry`。本仓库的 `cordis.patch.yml` 把条目 id 固定为 `settings-nav-manager`，与 `client.js` 的 `NS` 常量一致；改动任一处都会被 `test/repo.test.mjs` 拦住。
 
 ---
@@ -147,7 +149,15 @@ dsh plugin --profile <web|desktop> remove dsh-settings-nav-manager
 npm test          # 纯逻辑单测 + 仓库校验（秒级，无需浏览器）
 npm run test:e2e  # 无头 Chrome 端到端（真实 DOM + 真实 PointerEvent）
 npm run locale    # 由 client.js 的字典重新生成 locale/*.json
+
+# 改完源码要让它在本机桌面端生效：装好的那份是 node_modules 下的拷贝，不是软链
+node tools/sync-profile.mjs desktop      # 同步进已安装副本（会先整份备份）
+node tools/sync-profile.mjs desktop -n   # 只演练，看会改哪些文件
 ```
+
+> `dsh plugin add` 装的是**拷贝**：不重新安装/同步，桌面端跑的还是旧代码。同步脚本按
+> `package.json` 的 `files` 白名单走，跳过 `test/`、`tools/`、`assets/`；备份落在
+> `~/.dsh/profiles/<profile>/.snm-sync-backup/<时间戳>/`。同步后**必须完全退出并重开应用**。
 
 - `test/unit.test.mjs`：`normalize` / `serialize` / `applyDropTo` / `nudgeState` 等纯函数，包含 1.0.1 那个数据丢失缺陷的回归用例（「分区未知时不得裁剪」）。
 - `test/repo.test.mjs`：清单声明（`platform` 必须是 `web`、命名空间必须等于条目 id、兼容范围要有上界）、文案单一来源、源码卫生（无 `innerHTML` / `eval`、无选择器拼接）。
@@ -158,7 +168,7 @@ npm run locale    # 由 client.js 的字典重新生成 locale/*.json
 | 现象 | 处理 |
 |---|---|
 | 打开设置看不到齿轮 | 确认插件装在**当前 profile**（`web` 还是 `desktop`），装完需重启/重开应用；齿轮挂在 `settings.action` 槽，若被其他插件挤占可临时停用对方排查。 |
-| 齿轮旁出现「未能保存排版（…）」 | 括号里是宿主的原始拒绝原因。插件会依次尝试 `update` / `replace` / `mutate` 三条写入口，全都失败才提示；控制台 `[settings-nav-manager]` 有每一条的完整错误。常见原因见上方「数据结构与持久化」。 |
+| 齿轮旁出现「未能保存排版（…）」 | 括号里是宿主的原始拒绝原因。写入先走 `update`；**只有**宿主报「配置条目/命名空间不存在」时才退到路径式 `mutate`，其它拒绝（校验、配额、只读、权限）原样上报、不再换路重试——刻意不用整份替换的 `replace`，避免认错命名空间时清掉别人的配置。控制台 `[settings-nav-manager]` 有每一条的完整错误。 |
 | 齿轮旁出现「导航结构变化，暂未应用整理」 | 认行失配（行数与 `settings.section` 条目对不上）。通常是刚装了新插件、分区还在注册中；关掉重开设置即可。若持续出现，请在 issue 里附上你的分区列表。 |
 | 整理后重启又变回去了 | 1.0.0 的已知缺陷，升级到 **1.0.1** 即可。 |
 | 想彻底重置 | 编辑模式底部点「恢复默认」，或删除设置文档里 `settings-nav-manager` 命名空间的 `user` 段。 |

@@ -225,3 +225,56 @@ test("文案表：中英双语键集合一致", () => {
 test("inject 声明与宿主官方插件一致", () => {
   assert.deepEqual(plugin.inject, ["slots", "locale", "remote", "remote.settings"]);
 });
+
+test("isMissingEntry：只有「条目/命名空间不存在」类错误才允许换路重试", () => {
+  // 允许：宿主换了条目 id、条目被移除、Config 丢了 volatile 字段
+  for (const e of [
+    { code: "SETTINGS_NO_ENTRY" },
+    { code: "NOT_FOUND" },
+    { error: { code: "NO_SUCH_NS" } },
+    { message: 'No configurable plugin entry "settings-nav-manager"' },
+    { message: "plugin entry has no volatile fields" },
+  ]) {
+    assert.equal(T.isMissingEntry(e), true, "应允许换路：" + JSON.stringify(e));
+  }
+  // 不允许：校验失败 / 配额 / 只读 / 权限 —— 换 replace 重试等于绕过宿主校验
+  for (const e of [
+    null,
+    undefined,
+    {},
+    { code: "gateway/quota", message: "settings document quota exceeded" },
+    { code: "SETTINGS_CONFLICT", message: "revision mismatch" },
+    { code: "EACCES", message: "permission denied" },
+    { message: "schema validation failed: order[0] must be string" },
+  ]) {
+    assert.equal(T.isMissingEntry(e), false, "不该换路：" + JSON.stringify(e));
+  }
+});
+
+test("looksLikeOurValue：值形状不符的候选不得被认领", () => {
+  const ok = { version: 1, order: ["a"], groups: [{ id: "g-1", name: "x", items: [] }], hidden: ["b"] };
+  assert.equal(T.looksLikeOurValue(ok), true);
+  assert.equal(T.looksLikeOurValue({ order: [], groups: [], hidden: [] }), true, "没有 version 也应认");
+  for (const bad of [
+    null,
+    [],
+    "x",
+    { order: "not-an-array", groups: [], hidden: [] },
+    { order: [], groups: {}, hidden: [] },
+    { order: [], groups: [] },
+    { version: 2, order: [], groups: [], hidden: [] },
+    { order: [1], groups: [], hidden: [] },
+    { order: [], groups: [], hidden: [null] },
+  ]) {
+    assert.equal(T.looksLikeOurValue(bad), false, "不该认：" + JSON.stringify(bad));
+  }
+});
+
+test("looksLikeOurs：schema 指纹必须三键齐全", () => {
+  assert.equal(T.looksLikeOurs({ schema: { dict: { order: {}, groups: {}, hidden: {} } } }), true);
+  assert.equal(T.looksLikeOurs({ schema: { properties: { order: {}, groups: {}, hidden: {} } } }), true);
+  assert.equal(T.looksLikeOurs({ schema: { dict: { order: {}, groups: {} } } }), false, "缺 hidden 不算");
+  assert.equal(T.looksLikeOurs({ schema: {} }), false);
+  assert.equal(T.looksLikeOurs(null), false);
+  assert.equal(T.looksLikeOurs({}), false);
+});

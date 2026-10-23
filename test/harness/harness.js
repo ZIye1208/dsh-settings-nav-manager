@@ -56,13 +56,26 @@
       aliasNs: opts.aliasNs || null,
       schema: opts.schema || null,
     };
+    st.decoys = opts.decoys || [];
+    st.hideSelf = !!opts.hideSelf;
     st.describe = function () {
-      var nsName = st.aliasNs || "settings-nav-manager";
-      var view = { ns: nsName, revision: st.revision };
-      if (st.value) view.value = clone(st.value);
-      if (st.schema) view.schema = clone(st.schema);
+      var list = [];
+      if (!st.hideSelf) {
+        var nsName = st.aliasNs || "settings-nav-manager";
+        var view = { ns: nsName, revision: st.revision };
+        if (st.value) view.value = clone(st.value);
+        if (st.schema) view.schema = clone(st.schema);
+        list.push(view);
+      }
+      // 诱饵命名空间：模拟「别人的插件恰好也叫 order/groups/hidden」
+      (st.decoys || []).forEach(function (d) {
+        var v = { ns: d.ns, revision: 1 };
+        if (d.value !== undefined) v.value = clone(d.value);
+        if (d.schema !== undefined) v.schema = clone(d.schema);
+        list.push(v);
+      });
       // 真实契约：客户端远程统一返回 { ok, value } 信封
-      return { ok: true, value: { writable: true, hasDocument: true, namespaces: [view] } };
+      return { ok: true, value: { writable: true, hasDocument: true, namespaces: list } };
     };
     function nsAccepted(ns) {
       var expected = st.aliasNs || "settings-nav-manager";
@@ -617,10 +630,37 @@
   });
 
   scenarios.push({
+    name: "别名安装 + 首次使用（命名空间还没有值）也应能写入",
+    oldFails: true,
+    run: async function () {
+      // 失败关闭不能把「首次使用」也关掉：此时没有别人的文档可被覆盖，
+      // 唯一候选 + schema 指纹吻合就应该放行。
+      env.store = makeStore(null, 1, {
+        aliasNs: "@local/dsh-settings-nav-manager",
+        schema: { type: "object", dict: { version: {}, order: {}, groups: {}, hidden: {} } },
+      });
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var cell = cellBySection("models");
+      var r = cell.getBoundingClientRect();
+      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      await sleep(220);
+      var w = env.store.value || {};
+      assert((w.hidden || []).indexOf("models") >= 0, "首次使用就被失败关闭挡住了：" + JSON.stringify(w));
+      var used = env.store.attempts.map(function (a) {
+        return a.ns;
+      });
+      assert(used[used.length - 1] === "@local/dsh-settings-nav-manager", "写入 ns 不对：" + used.join(","));
+      return "写入 ns=" + used[used.length - 1];
+    },
+  });
+
+  scenarios.push({
     name: "宿主用 {ok:false} 拒写时不能当成功，并换路重试",
     oldFails: true,
     run: async function () {
-      // 只拒 update（模拟宿主那侧对这条写入口的拒绝），replace 仍然可用
+      // 只拒 update（模拟宿主那侧对这条写入口的拒绝），mutate 仍然可用
       env.store = makeStore(SAVED, 3, {
         rejectMethod: "update",
         rejectCode: "gateway/internal",
@@ -638,9 +678,108 @@
       var methods = env.store.attempts.map(function (a) {
         return a.method;
       });
-      assert(methods.indexOf("update") >= 0 && methods.indexOf("replace") >= 0, "没有换路重试：" + methods.join(","));
+      assert(methods.indexOf("update") >= 0 && methods.indexOf("mutate") >= 0, "没有换路重试：" + methods.join(","));
+      assert(methods.indexOf("replace") < 0, "不该再走整份替换（会覆写同命名空间的其他字段）：" + methods.join(","));
       assert(!document.querySelector("[data-snm-notice]"), "最终写成功了却还留着告警");
       return "路径=" + methods.join("→");
+    },
+  });
+
+  scenarios.push({
+    name: "非「条目不存在」的拒写不得换路重试（不许升权重试）",
+    oldFails: true,
+    run: async function () {
+      // 校验/配额类拒绝：换 replace / mutate 重试等于用更大的权限绕过宿主校验
+      env.store = makeStore(SAVED, 3, {
+        rejectMethod: "update",
+        rejectCode: "gateway/quota",
+        rejectMessage: "settings document quota exceeded",
+      });
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var cell = cellBySection("models");
+      var r = cell.getBoundingClientRect();
+      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      await sleep(200);
+      var methods = env.store.attempts.map(function (a) {
+        return a.method;
+      });
+      assert(methods.length === 1 && methods[0] === "update", "被合法拒绝后仍在换路重试：" + methods.join(","));
+      assert(document.querySelector("[data-snm-notice]"), "被拒后没有可见提示");
+      return "只尝试了 " + methods.join(",");
+    },
+  });
+
+  scenarios.push({
+    name: "命名空间歧义时失败关闭（一个字都不写）",
+    oldFails: true,
+    run: async function () {
+      var schema = { type: "object", dict: { version: {}, order: {}, groups: {}, hidden: {} } };
+      env.store = makeStore(SAVED, 3, {
+        hideSelf: true,
+        decoys: [
+          { ns: "other-layout-plugin", schema: schema, value: { order: ["a"], groups: [], hidden: [] } },
+          { ns: "another-board-plugin", schema: schema, value: { order: ["b"], groups: [], hidden: [] } },
+        ],
+      });
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var cell = cellBySection("models");
+      var r = cell.getBoundingClientRect();
+      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      await sleep(220);
+      assert(env.store.attempts.length === 0, "歧义时仍发起了写入：" + JSON.stringify(env.store.attempts));
+      assert(document.querySelector("[data-snm-notice]"), "失败关闭却没有任何提示");
+      return "attempts=0，已提示";
+    },
+  });
+
+  scenarios.push({
+    name: "唯一候选但值形状不符时也不认领",
+    oldFails: true,
+    run: async function () {
+      var schema = { type: "object", dict: { version: {}, order: {}, groups: {}, hidden: {} } };
+      env.store = makeStore(SAVED, 3, {
+        hideSelf: true,
+        decoys: [{ ns: "lookalike", schema: schema, value: { order: "not-an-array", groups: [], hidden: [] } }],
+      });
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var cell = cellBySection("models");
+      var r = cell.getBoundingClientRect();
+      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      await sleep(220);
+      assert(env.store.attempts.length === 0, "值形状不符仍被认领：" + JSON.stringify(env.store.attempts));
+      return "attempts=0";
+    },
+  });
+
+  // 注意：这条不能标 oldFails —— 1.0.0 在 pointermove 里同步结算落点，本来是通过的；
+  // 落点丢失是 1.0.1 引入「按帧合并预览」时带来的回归。用 1.0.0 做 A/B 基线测不出它。
+  scenarios.push({
+    name: "同帧抬手（最后一次 move 与 pointerup 同帧）落点也必须生效",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var from = cellBySection("models");
+      var to = cellBySection("general");
+      var fr = from.getBoundingClientRect();
+      var tr = to.getBoundingClientRect();
+      var x = fr.left + 40;
+      // 三次 dispatch 在同一个任务里完成 —— 中间不可能有空帧，重现「快速甩动释放」
+      pointer("pointerdown", from, x, fr.top + fr.height / 2);
+      pointer("pointermove", from, x, fr.top + fr.height / 2 + 20);
+      pointer("pointermove", from, x, tr.top + 2);
+      pointer("pointerup", from, x, tr.top + 2);
+      await sleep(150);
+      var order = (env.store.value || {}).order || [];
+      assert(order[0] === "models", "同帧抬手丢了拖拽落点：" + JSON.stringify(order));
+      return "order=" + JSON.stringify(order);
     },
   });
 

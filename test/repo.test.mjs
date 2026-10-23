@@ -121,3 +121,10 @@ test("CHANGELOG 版本号与 package.json 一致", () => {
   const log = read("CHANGELOG.md");
   assert.ok(log.includes("## " + PKG.version), "CHANGELOG 未记录当前版本 " + PKG.version);
 });
+
+test("安全：不得再用整份替换的写入口，且失败要能收敛", () => {
+  // replace 是整份覆盖：一旦命名空间认错，同命名空间里其他字段会被清掉，且无备份。
+  assert.equal(SRC.includes('writeVia("replace"'), false, "replace 已禁用，别再加回来");
+  assert.ok(SRC.includes("nsResolved"), "缺少「命名空间未知 → 一个字都不写」的失败关闭守卫");
+  assert.ok(SRC.includes("if (!isMissingEntry"), "降级重试必须按错误类型收敛，不能见错就换路");
+});

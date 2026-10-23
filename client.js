@@ -147,6 +147,33 @@ window.__ModuleLoader__.load({
       return findGroup(state, id) !== null;
     }
 
+    // ── 宿主契约判定（纯函数，可单测）──────────────────────────
+    // 「宿主的配置条目不存在」这一类错误才允许换写入口重试。
+    function isMissingEntry(err) {
+      if (!err) return false;
+      var code = String(err.code || (err.error && err.error.code) || "");
+      if (/NO_ENTRY|NOT_FOUND|NO_SUCH|MISSING/i.test(code)) return true;
+      var msg = String(err.message || (err.error && err.error.message) || "");
+      return /no configurable plugin entry|no such namespace|no volatile fields/i.test(msg);
+    }
+    // 我们的字段指纹：schema 里同时有这三个键，基本只可能是本插件
+    function looksLikeOurs(entry) {
+      var schema = entry && entry.schema;
+      var fields = (schema && (schema.dict || schema.properties)) || null;
+      if (!fields) return false;
+      return "order" in fields && "groups" in fields && "hidden" in fields;
+    }
+    // 光字段名像还不够：值也得长成我们的样子，否则一个「恰好也叫 order/groups/hidden」
+    // 的插件命名空间会被误认，而误认的代价是覆写别人的配置。
+    function looksLikeOurValue(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+      if (!Array.isArray(value.order) || !Array.isArray(value.hidden) || !Array.isArray(value.groups)) return false;
+      if (value.version !== undefined && num(value.version) !== 1) return false;
+      for (var i = 0; i < value.hidden.length; i++) if (!isStr(value.hidden[i])) return false;
+      for (var j = 0; j < value.order.length; j++) if (!isStr(value.order[j])) return false;
+      return true;
+    }
+
     // ── sections 投影：只依赖 ctx，与 DOM 是否挂载无关（P0 根因）────
     function projectSections(ctx) {
       var out = [];
@@ -499,11 +526,15 @@ window.__ModuleLoader__.load({
       var sections = [];
       var revision;
       // 实际用于写入的命名空间：默认 NS；若宿主把条目 id 改写（别名安装等），
-      // findNs() 会按 schema 指纹认领真实 id 并记在这里。
+      // findNs() 会认领真实 id 并记在这里。
       var nsId = NS;
+      // nsResolved=false 表示「describe 明确告诉我们自己的命名空间不存在」——
+      // 此时一律不写（失败关闭）。默认 true：describe 尚未返回前保持旧行为。
+      var nsResolved = true;
       var groupSeq = 1;
       var t = null;
       var drag = null;
+      var dragGen = 0; // 拖拽世代号：抬手后排队的帧回调必须自动作废
       var justActedAt = 0;
       var notice = "";
       var noticeTimer = null;
@@ -781,11 +812,16 @@ window.__ModuleLoader__.load({
         ];
       }
       function persist() {
+        // describe 已确认「自己的命名空间不存在」→ 失败关闭：一个字节都不写。
+        // 旧实现会拿默认 NS 无脑往下写，正是靠失败换来的重试把写打到了别人的 ns 上。
+        if (!nsResolved) {
+          dbg("save", "namespace unresolved: " + NS + " 不在 describe() 里");
+          report("save", null, "saveFailed"); // 不把内部 token 甩给用户看
+          return Promise.resolve(false);
+        }
         var payload = serializeState(state, knownIdsFrom(sections));
         if (!payload) return Promise.resolve(false); // 分区未知（面板没开）→ 不写，防覆盖
         var ops = payloadOps(payload);
-        // 三条路都落在宿主的同一个写入口，但校验层次不同：update 走合并、
-        // replace 走整体替换、mutate 走路径校验。前一条被拒就换下一条。
         return writeVia("update", payload).then(function (r1) {
           if (r1.ok) return settleOk(r1.res);
           dbg("update rejected", r1.error);
@@ -794,23 +830,32 @@ window.__ModuleLoader__.load({
               return writeVia("update", payload).then(function (r1b) {
                 if (r1b.ok) return settleOk(r1b.res);
                 dbg("update retry rejected", r1b.error);
-                return tryFallbacks(payload, ops, r1b.error);
+                if (!isMissingEntry(r1b.error)) {
+                  report("save", r1b.error);
+                  return false;
+                }
+                return tryMutate(ops, r1b.error);
               });
             });
           }
-          return tryFallbacks(payload, ops, r1.error);
+          // 只有「条目/命名空间不存在」值得换写入口重试。校验失败、配额、只读、
+          // 权限拒绝都必须原样上报 —— 拿 replace 重试一个已被合法拒绝的写，
+          // 等于用更大的权限绕过宿主的校验层次。
+          if (!isMissingEntry(r1.error)) {
+            report("save", r1.error);
+            return false;
+          }
+          return tryMutate(ops, r1.error);
         });
       }
-      function tryFallbacks(payload, ops, firstError) {
-        return writeVia("replace", payload).then(function (r2) {
+      // 唯一的降级目标：路径式写入（逐字段 set，宿主按路径校验，不会整份覆盖）。
+      // 刻意不再使用 replace —— 它是整份替换，一旦命名空间认错就是清掉别人的配置。
+      function tryMutate(ops, firstError) {
+        return writeVia("mutate", null, ops).then(function (r2) {
           if (r2.ok) return settleOk(r2.res);
-          dbg("replace rejected", r2.error);
-          return writeVia("mutate", payload, ops).then(function (r3) {
-            if (r3.ok) return settleOk(r3.res);
-            dbg("mutate rejected", r3.error);
-            report("save", r3.error || firstError);
-            return false;
-          });
+          dbg("mutate rejected", r2.error);
+          report("save", r2.error || firstError);
+          return false;
         });
       }
       function settleOk(res) {
@@ -839,8 +884,9 @@ window.__ModuleLoader__.load({
             return rm.describe();
           })
           .then(function (res) {
-            var ns = findNs(unwrapValue(res) || {});
-            revision = ns && typeof ns.revision === "number" ? ns.revision : undefined;
+            // 只取 revision，不改写入目标（nsResolved / nsId 由 loadState 决定）
+            var located = locateNs(unwrapValue(res) || {});
+            revision = located.entry && typeof located.entry.revision === "number" ? located.entry.revision : undefined;
             return revision;
           })
           .catch(function (e) {
@@ -849,31 +895,45 @@ window.__ModuleLoader__.load({
             return undefined;
           });
       }
-      // 我们的字段指纹：schema 里同时有这四个键，基本只可能是本插件
-      function looksLikeOurs(entry) {
-        var schema = entry && entry.schema;
-        var fields = (schema && (schema.dict || schema.properties)) || null;
-        if (!fields) return false;
-        return "order" in fields && "groups" in fields && "hidden" in fields;
-      }
-      function findNs(res) {
+      // 纯查询：只回答「我们的命名空间在哪」，不碰实例状态。
+      // （写状态会带来一个坑：冲突重试时的 reloadRevision 也会查一次，
+      //   一次瞬时失败就会把 nsResolved 永久打成 false，之后再也不写。）
+      // 返回 { resolved, ns, entry }：resolved=false 表示确认「这里没有我们的命名空间」。
+      function locateNs(res) {
         var arr = res && res.namespaces;
-        if (!Array.isArray(arr)) return null;
+        if (!Array.isArray(arr)) return { resolved: false, ns: null, entry: null };
         for (var i = 0; i < arr.length; i++) {
-          if (arr[i] && arr[i].ns === NS) {
-            nsId = NS;
-            return arr[i];
-          }
+          if (arr[i] && arr[i].ns === NS) return { resolved: true, ns: NS, entry: arr[i] };
         }
-        // 条目 id 被别名/前缀改写时，按 schema 指纹认领自己的命名空间
+        // 条目 id 被别名/前缀改写时才走到这里。认领必须「唯一且可验证」：
+        // 候选多于一个就放弃 —— 与其猜，不如不写（写错 ns 会毁掉别的插件的数据）。
+        var cand = null;
         for (var j = 0; j < arr.length; j++) {
-          if (arr[j] && looksLikeOurs(arr[j])) {
-            nsId = String(arr[j].ns);
-            dbg("namespace alias", NS + " -> " + nsId);
-            return arr[j];
+          var e = arr[j];
+          if (!e || !looksLikeOurs(e)) continue;
+          // 有值就必须长成我们的样子；本来就没有值（首次使用）才允许认领，
+          // 因为「覆盖一份已存在的别人的文档」才是真正的破坏。
+          var hasValue = e.value !== undefined && e.value !== null;
+          if (hasValue && !looksLikeOurValue(e.value)) continue;
+          if (cand) {
+            dbg("namespace alias ambiguous", String(e.ns));
+            return { resolved: false, ns: null, entry: null };
           }
+          cand = e;
         }
-        return null;
+        if (!cand) return { resolved: false, ns: null, entry: null };
+        return { resolved: true, ns: String(cand.ns), entry: cand };
+      }
+      // 采用查询结果（只在 loadState 里调用：以 describe 为准更新写入目标）
+      function adoptNs(located) {
+        if (!located || !located.resolved || !located.entry) {
+          nsResolved = false;
+          return null;
+        }
+        nsId = located.ns;
+        nsResolved = true;
+        if (nsId !== NS) dbg("namespace alias", NS + " -> " + nsId);
+        return located.entry;
       }
       function loadState() {
         var rm = remote();
@@ -884,7 +944,7 @@ window.__ModuleLoader__.load({
           })
           .then(function (res) {
             var view = unwrapValue(res) || {};
-            var ns = findNs(view);
+            var ns = adoptNs(locateNs(view));
             if (!ns) dbg("namespace missing", "settings.describe 里没有 " + NS);
             state = createState(ns && ns.value);
             revision = ns && typeof ns.revision === "number" ? ns.revision : undefined;
@@ -1316,6 +1376,8 @@ window.__ModuleLoader__.load({
             pointerId: e.pointerId,
           };
         }
+        // 新一轮拖拽：作废上一轮可能还排队的帧回调，避免它把落点写进新的一轮
+        if (drag) dragGen++;
       }
 
       function onPointerMove(e) {
@@ -1340,8 +1402,9 @@ window.__ModuleLoader__.load({
           e.preventDefault();
         } catch (err2) {}
         // 同一帧内多次 move 只算一次（合并到最新落点）
+        var gen = dragGen;
         scheduleFrame(function () {
-          if (!drag || !drag.active) return;
+          if (!drag || !drag.active || dragGen !== gen) return;
           var drop = computeDrop(drag.nav, drag.lastY, drag);
           clearDropMarks(drag.nav);
           if (drop && drop.type === "into-group") {
@@ -1355,11 +1418,21 @@ window.__ModuleLoader__.load({
 
       function endDrag(commit) {
         if (!drag) return;
-        var wasActive = drag.active;
-        var el = drag.el;
-        if (el) el.removeAttribute(DATA.dragging);
-        if (drag.nav) clearDropMarks(drag.nav);
-        if (wasActive && !commit && drag.base) state = drag.base; // 取消 → 回滚
+        var finished = drag;
+        var wasActive = finished.active;
+        dragGen++; // 抬手即作废已排队的帧回调
+        if (finished.el) finished.el.removeAttribute(DATA.dragging);
+        if (finished.nav) clearDropMarks(finished.nav);
+        // 落点必须在这一刻同步结算：预览走的是 rAF 合并，若「最后一次 pointermove」
+        // 与「pointerup」落在同一帧（快速甩动、高刷屏、尾帧抖动），帧回调还没跑、
+        // drag 已被清空 —— 落点就这么丢了，而且会把未改动的布局写回盘。
+        if (wasActive && finished.base) {
+          if (commit && finished.nav) {
+            state = applyDropTo(finished.base, finished, computeDrop(finished.nav, finished.lastY, finished));
+          } else {
+            state = finished.base; // 取消 → 回滚
+          }
+        }
         drag = null;
         if (wasActive) {
           justActedAt = Date.now();
@@ -1747,6 +1820,9 @@ window.__ModuleLoader__.load({
       projectSections: projectSections,
       knownIdsFrom: knownIdsFrom,
       sectionIds: sectionIds,
+      isMissingEntry: isMissingEntry,
+      looksLikeOurs: looksLikeOurs,
+      looksLikeOurValue: looksLikeOurValue,
     };
     return module.exports;
   },
