@@ -362,12 +362,25 @@ test("buildCss：侧栏入口页的选择器齐全", () => {
 test("侧栏入口 id：main 与 sidebar.panellist 必须用同一个 key", () => {
   // layout 用 `entries("main").some(e => e.options.key === id)` 判定面板存在，
   // sidebar 用 panellist 的 id 切过去 —— 两者一旦不一致就是点击抛错。
-  assert.equal(T.PANEL_ID, "settings-nav");
+  assert.equal(T.PANEL_ID, "settings-nav-manager.nav", "id 要带命名空间，别占用宿主的短名");
+  assert.equal(T.ENTRY_ORDER, 20, "order 要排在 plugins(0)/schedules(10) 之后，且不抢 30+ 的位置");
   assert.ok(SRC.includes('"sidebar.panellist"'), "缺少侧栏入口注册");
   assert.ok(SRC.includes('name: "main"'), "缺少 main 页面注册");
   assert.ok(SRC.includes("key: PANEL_ID"), "main 注册必须带 key: PANEL_ID");
   assert.ok(SRC.includes("id: PANEL_ID"), "panellist 注册必须带 id: PANEL_ID");
 });
+
+test("cleanText：分区名是宿主给的，双向控制符必须被去掉", () => {
+  // 尖括号由 React 当文本转义，不归这里管；这里只压控制符 ——
+  // U+202E 这类字符能让「模型」显示成反序，属于实打实的伪装（审查 SEC-4）。
+  assert.equal(T.cleanText("通用设置"), "通用设置");
+  assert.equal(T.cleanText("通\u202e用"), "通用", "U+202E 必须剔除");
+  assert.equal(T.cleanText("a\u200bb"), "ab", "零宽字符必须剔除");
+  assert.equal(T.cleanText("a\u0007b"), "ab", "C0 控制字符必须剔除");
+  assert.equal(T.cleanText(null), "", "非字符串不崩");
+  assert.equal(T.cleanText(123), "", "非字符串一律返回空串");
+});
+
 
 // ── 侧栏入口开关：hideEntry 要能存、能读、不误伤老数据 ──────────
 test("hideEntry：缺省为 false，只有严格 true 才算隐藏", () => {

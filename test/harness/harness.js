@@ -20,11 +20,16 @@
     hidden: ["plugins"],
   };
 
-  var env = { disposers: [], store: null };
-  var hookState = [];
+  var env = { disposers: [], store: null, shell: null, log: [], panel: null };
+  var hookState = []; // 旧单挂载点路径保留（副作用只有设置弹窗里的齿轮用）
   var hookCursor = 0;
   var effectRan = {};
   var mounted = { Component: null, container: null, queued: false };
+  // 宿主按 `spec.name` 分槽：同一个 key 不能只留最后注册的那个组件（审查 COR-1）
+  var regs = { "settings.action": [], "sidebar.panellist": [], main: [] };
+  var mounts = {};
+  var curMount = null;
+  var PLUGIN_ID = "settings-nav-manager.nav";
 
   function clone(x) {
     return x === undefined ? undefined : JSON.parse(JSON.stringify(x));
@@ -129,18 +134,58 @@
     return st;
   }
 
-  // ── 最小 React 运行时：能 render / useState / useEffect ──────
+  // ── 最小 React 运行时：每个挂载点各有自己的 hook 槽位 ────────
+  // 宿主里齿轮、入口页、侧栏图标是三棵独立的组件树；测试台若共用一个
+  // hook 数组，后挂的组件会把前一个的状态挤掉（正是 COR-1 的成因）。
   function rerender() {
-    if (!mounted.Component || !mounted.container) return;
-    if (mounted.queued) return;
-    mounted.queued = true;
-    Promise.resolve().then(function () {
-      mounted.queued = false;
-      hookCursor = 0;
-      var node = renderNode(mounted.Component());
-      mounted.container.textContent = "";
-      mounted.container.appendChild(node);
+    Object.keys(mounts).forEach(function (key) {
+      var m = mounts[key];
+      if (!m || !m.Component || !m.container || m.queued || !m.container.isConnected) return;
+      m.queued = true;
+      Promise.resolve().then(function () {
+        m.queued = false;
+        if (!m.Component || !m.container || !m.container.isConnected) return;
+        renderMount(key);
+      });
     });
+  }
+  function renderMount(key) {
+    var m = mounts[key];
+    if (!m || !m.Component || !m.container) return;
+    curMount = m;
+    m.cursor = 0;
+    var node = renderNode(m.Component(m.props));
+    curMount = null;
+    m.container.textContent = "";
+    m.container.appendChild(node);
+  }
+  function mountInto(key, container, Component, props) {
+    if (!mounts[key]) mounts[key] = { key: key, state: [], cursor: 0, effects: {}, cleanups: [], props: null };
+    var m = mounts[key];
+    m.container = container;
+    m.Component = Component;
+    m.props = props;
+    renderMount(key);
+    return m;
+  }
+  function unmount(key) {
+    var m = mounts[key];
+    if (!m) return;
+    while (m.cleanups.length) {
+      try {
+        m.cleanups.pop()();
+      } catch (e) {
+        /* 卸载清理不该让测试挂掉 */
+      }
+    }
+    m.Component = null;
+    if (m.container) m.container.textContent = "";
+  }
+  function activeMount() {
+    if (curMount) return curMount;
+    // 兜底：不在挂载渲染期间调用 hook（例如组件被直接函数式调用）
+    if (!mounts.__loose) mounts.__loose = { key: "__loose", state: hookState, cursor: 0, effects: effectRan, cleanups: [] };
+    return mounts.__loose;
   }
   var ReactShim = {
     createElement: function (type, props) {
@@ -149,26 +194,26 @@
       return { __el: true, type: type, props: props || {}, children: children };
     },
     useState: function (init) {
-      var i = hookCursor++;
-      if (!(i in hookState)) hookState[i] = typeof init === "function" ? init() : init;
+      var m = activeMount();
+      var i = m.cursor++;
+      if (!(i in m.state)) m.state[i] = typeof init === "function" ? init() : init;
       return [
-        hookState[i],
+        m.state[i],
         function (next) {
-          var val = typeof next === "function" ? next(hookState[i]) : next;
-          if (val !== hookState[i]) {
-            hookState[i] = val;
-            rerender();
-          }
+          var val = typeof next === "function" ? next(m.state[i]) : next;
+          if (val === m.state[i]) return;
+          m.state[i] = val;
+          rerender();
         },
       ];
     },
     useEffect: function (fn) {
-      var i = 5000 + hookCursor++;
-      if (!effectRan[i]) {
-        effectRan[i] = true;
-        var cleanup = fn();
-        if (typeof cleanup === "function") env.disposers.push(cleanup);
-      }
+      var m = activeMount();
+      var i = 5000 + m.cursor++;
+      if (m.effects[i]) return;
+      m.effects[i] = true;
+      var cleanup = fn();
+      if (typeof cleanup === "function") m.cleanups.push(cleanup);
     },
   };
 
@@ -234,6 +279,7 @@
       btn.appendChild(icon);
       btn.appendChild(label);
       btn.addEventListener("click", function () {
+        if (env.shell && env.shell.dead) return; // 假装宿主这次点了没反应
         selectRow(sec.id);
       });
       list.appendChild(btn);
@@ -325,25 +371,126 @@
     );
   }
 
-  // ── 装配 ────────────────────────────────────────────────────
-  // 面板是「打开设置」时才插进 DOM 的，齿轮只能等容器出现后再挂载
-  function mountGear() {
-    if (!mounted.Component) return false;
-    var container = document.querySelector(".xx_actions");
-    if (!container) return false;
-    if (mounted.container === container && container.firstChild) return true;
-    mounted.container = container;
-    hookCursor = 0;
-    container.textContent = "";
-    container.appendChild(renderNode(mounted.Component()));
+  // ── 宿主外壳：左侧插件栏 + 主面板容器 ──────────────────────
+  function chrome() {
+    var bar = document.getElementById("xx_sidebar");
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.id = "xx_sidebar";
+      bar.className = "xx_panelList";
+      document.body.appendChild(bar);
+    }
+    var main = document.getElementById("xx_main");
+    if (!main) {
+      main = document.createElement("div");
+      main.id = "xx_main";
+      main.className = "xx_main";
+      document.body.appendChild(main);
+    }
+    return { bar: bar, main: main };
+  }
+  function sidebarRows() {
+    var bar = document.getElementById("xx_sidebar");
+    return bar ? Array.prototype.slice.call(bar.querySelectorAll("[data-panel-id]")) : [];
+  }
+  function sidebarRow(id) {
+    return (
+      sidebarRows().filter(function (r) {
+        return r.getAttribute("data-panel-id") === id;
+      })[0] || null
+    );
+  }
+
+  // 宿主侧栏：按 order 稳定排序后渲染，点行 → selectPanel(id)
+  function mountSidebar() {
+    var bar = chrome().bar;
+    var sorted = regs["sidebar.panellist"].slice().sort(function (a, b) {
+      return (a.spec.order || 0) - (b.spec.order || 0);
+    });
+    bar.textContent = "";
+    sorted.forEach(function (rec) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "xx_panelRow panelRow";
+      btn.setAttribute("data-panel-id", rec.spec.id);
+      var icon = document.createElement("span");
+      icon.className = "xx_panelIcon";
+      btn.appendChild(icon);
+      var title = document.createElement("span");
+      title.className = "xx_panelTitle";
+      var label = rec.spec.label;
+      title.textContent = typeof label === "function" ? String(label()) : String(label || rec.spec.id);
+      btn.appendChild(title);
+      btn.addEventListener("click", function () {
+        selectPanel(rec.spec.id);
+      });
+      bar.appendChild(btn);
+      // 图标在真机上也是独立组件（宿主单独渲染），这里同样真挂一次
+      if (typeof rec.Component === "function") mountInto("icon:" + rec.spec.id, icon, rec.Component);
+    });
+  }
+
+  // 宿主 layout：没有同名 main 面板就抛错（插件必须注册同 key 的页面）
+  function selectPanel(id) {
+    env.panel = id;
+    var main = chrome().main;
+    var rec = null;
+    regs.main.forEach(function (r) {
+      if (r.spec && r.spec.key === id) rec = r;
+    });
+    if (!rec) {
+      main.textContent = "";
+      throw new Error('layout.selectPanel: main panel "' + id + '" is not registered');
+    }
+    var props = typeof rec.spec.inject === "function" ? rec.spec.inject() : undefined;
+    mountInto("main:" + id, main, rec.Component, props);
     return true;
   }
 
+  // ── 装配 ────────────────────────────────────────────────────
+  // 面板是「打开设置」时才插进 DOM 的，齿轮只能等容器出现后再挂载
+  function mountGear() {
+    var list = regs["settings.action"];
+    if (!list.length) return false;
+    var container = document.querySelector(".xx_actions");
+    if (!container) return false;
+    mountInto("gear", container, list[list.length - 1].Component);
+    return true;
+  }
+
+  function ensurePanel() {
+    if (!panelEl()) document.body.appendChild(buildPanel());
+    return panelEl();
+  }
+
   async function openPanel() {
-    document.body.appendChild(buildPanel());
+    ensurePanel();
     await sleep(60);
     mountGear();
     await sleep(60);
+  }
+
+  // 假设置 shell：深链要调 openSection(id)，它只改 activeId + open
+  function makeShell() {
+    var sh = {
+      calls: [],
+      dead: false,
+      open: function () {
+        ensurePanel();
+      },
+      close: function () {},
+      select: function (id) {
+        ensurePanel();
+        selectRow(id);
+      },
+      openSection: function (id) {
+        sh.calls.push(id);
+        if (sh.dead) return; // 宿主不校验 id：改了 activeId 却什么都没渲染出来
+        ensurePanel();
+        selectRow(id);
+      },
+    };
+    return sh;
   }
 
   function makeCtx() {
@@ -368,13 +515,46 @@
             return { options: { id: s.id, order: s.order, label: s.label } };
           });
         },
+        // 设置 shell 把「活实例」暴露在这里，插件的深链走这条路
+        entriesOfSlot: function (key) {
+          if (key !== "sidebar.settings") return [];
+          return [
+            {
+              options: { id: "settings" },
+              store: {
+                create: function () {
+                  return { actions: env.shell };
+                },
+              },
+            },
+          ];
+        },
         inject: function (name, cb) {
           return cb();
         },
         register: function (spec, Component) {
-          mounted.Component = Component;
-          mountGear();
-          return function () {};
+          var name = (spec && spec.name) || "";
+          if (!regs[name]) regs[name] = [];
+          var rec = { spec: spec || {}, Component: Component };
+          var id = spec && (spec.id || spec.key);
+          regs[name].push(rec);
+          env.log.push({ op: "register", name: name, id: id });
+          if (name === "settings.action") mountGear();
+          if (name === "sidebar.panellist") mountSidebar();
+          if (name === "main" && env.panel === (spec && spec.key)) selectPanel(spec.key);
+          return function () {
+            var i = regs[name].indexOf(rec);
+            if (i >= 0) regs[name].splice(i, 1);
+            env.log.push({ op: "dispose", name: name, id: id });
+            if (name === "settings.action") {
+              unmount("gear");
+              mountGear();
+            }
+            if (name === "sidebar.panellist") {
+              unmount("icon:" + id);
+              mountSidebar();
+            }
+          };
         },
       },
       remote: { settings: env.store },
@@ -388,6 +568,8 @@
       if (name === "react") return ReactShim;
       throw new Error("unexpected require: " + name);
     });
+    chrome();
+    env.shell = makeShell();
     ex.apply(makeCtx());
     return ex;
   }
@@ -400,6 +582,22 @@
         /* 旧版本没有 dispose，忽略 */
       }
     }
+    Object.keys(mounts).forEach(function (k) {
+      var m = mounts[k];
+      if (!m) return;
+      while (m.cleanups && m.cleanups.length) {
+        try {
+          m.cleanups.pop()();
+        } catch (e) {
+          /* 忽略 */
+        }
+      }
+    });
+    mounts = {};
+    curMount = null;
+    regs = { "settings.action": [], "sidebar.panellist": [], main: [] };
+    env.log = [];
+    env.panel = null;
     var p = panelEl();
     if (p) p.remove();
     Array.prototype.slice.call(document.querySelectorAll("style[data-plugin-css]")).forEach(function (s) {
@@ -841,6 +1039,101 @@
       assert(!document.querySelector("[data-snm-row]"), "卸载后仍残留 data-snm-row");
       assert(!document.querySelector("[data-snm-group]"), "卸载后仍残留抽屉头");
       return "clean";
+    },
+  });
+
+  // ── 1.1.0 / 1.2.0 新功能的端到端覆盖（审查 COR-1'：新槽位必须有 e2e）──
+  scenarios.push({
+    name: "侧栏入口：点行进页面，点分区直接打开设置并选中",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await sleep(120);
+      var row = sidebarRow(PLUGIN_ID);
+      assert(row, "侧栏没出现「设置导航」入口行");
+      row.click(); // 宿主 selectPanel → 入口页挂载
+      await sleep(80);
+      var page = document.querySelector("[data-snm-page]");
+      assert(page, "点入口行后主面板没渲染入口页");
+      var target = page.querySelector('[data-snm-page-row][data-snm-page-id="models"]');
+      assert(target, "入口页里没有 models 这一行");
+      target.click();
+      await sleep(600);
+      assert(env.shell.calls.indexOf("models") >= 0, "深链没调用 openSection(models)：" + JSON.stringify(env.shell.calls));
+      assert(cellBySection("models").getAttribute("aria-current") === "true", "设置里没选中 models");
+      assert(!document.querySelector("[data-snm-page-error]"), "深链成功却显示了错误横幅");
+      return "openSection=" + JSON.stringify(env.shell.calls);
+    },
+  });
+
+  scenarios.push({
+    name: "深链失败：入口页显示错误并可重试",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await sleep(120);
+      env.shell.dead = true; // 宿主改了 activeId 但界面毫无反应
+      sidebarRow(PLUGIN_ID).click();
+      await sleep(80);
+      var target = document.querySelector('[data-snm-page-row][data-snm-page-id="models"]');
+      target.click();
+      await sleep(1500); // 轮询窗（8×40ms）+ DOM 兜底也要跑完
+      var box = document.querySelector("[data-snm-page-error]");
+      assert(box, "深链失败后入口页没有任何错误提示（静默失效）");
+      assert(box.textContent.length > 0, "错误提示没有文案");
+      assert(document.querySelector("[data-snm-page-error-retry]"), "错误态没有重试入口");
+      return "错误可见";
+    },
+  });
+
+  scenarios.push({
+    name: "入口开关：齿轮旁切换注册/注销，并落盘",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await sleep(120);
+      assert(sidebarRow(PLUGIN_ID), "初始应有入口行");
+      await openPanel();
+      await enterEditing();
+      var toggle = document.querySelector("[data-snm-entry-toggle]");
+      assert(toggle, "齿轮旁没有入口开关");
+      var before = env.log.filter(function (r) {
+        return r.name === "sidebar.panellist" && r.op === "register";
+      }).length;
+      toggle.click();
+      await sleep(150);
+      assert(!sidebarRow(PLUGIN_ID), "隐藏后侧栏仍有入口行");
+      assert((env.store.value || {}).hideEntry === true, "hideEntry 没写进磁盘");
+      var toggle2 = document.querySelector("[data-snm-entry-toggle]");
+      assert(toggle2, "隐藏后开关自己也不见了");
+      toggle2.click();
+      await sleep(150);
+      assert(sidebarRow(PLUGIN_ID), "再点一次没有恢复入口行");
+      assert((env.store.value || {}).hideEntry === false, "恢复后 hideEntry 未回写 false");
+      var regs2 = env.log.filter(function (r) {
+        return r.name === "sidebar.panellist" && r.op === "register";
+      }).length;
+      assert(regs2 > before, "恢复时没有重新注册（注册次数 " + before + " → " + regs2 + "）");
+      return "注册 " + before + " → " + regs2;
+    },
+  });
+
+  scenarios.push({
+    name: "入口隐藏状态跨重启生效（且启动瞬间不闪）",
+    run: async function () {
+      var saved = clone(SAVED);
+      saved.hideEntry = true;
+      env.store = makeStore(saved, 3);
+      applyFresh();
+      // 门闩：describe 还没回来时不能按默认态先把入口注册出来
+      assert(!sidebarRow(PLUGIN_ID), "启动瞬间就渲染了应隐藏的入口（闪烁）");
+      await sleep(200);
+      assert(!sidebarRow(PLUGIN_ID), "describe 回来之后入口仍然出现了");
+      var mainReg = env.log.filter(function (r) {
+        return r.name === "main" && r.op === "register";
+      });
+      assert(mainReg.length >= 1, "页面注册被一起摘掉了（会导致 selectPanel 抛错）");
+      return "隐藏生效，main 仍在册";
     },
   });
 

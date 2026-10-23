@@ -30,7 +30,11 @@ window.__ModuleLoader__.load({
     // 侧栏插件栏入口与 main 页面的同一个 id：
     //  * layout 用 `main` 槽里 key === id 的条目判断面板存在（否则 selectPanel 抛错）；
     //  * sidebar 用 `sidebar.panellist` 里的 id 渲染行、点击时切过去。
-    var PANEL_ID = "settings-nav";
+    // 面板 id 带命名空间前缀：槽位 key/id 是全局的，裸名容易跟别人的条目撞
+    var PANEL_ID = NS + ".nav";
+    // 侧栏插件栏的排序位：宿主自身 插件=0 / 自动化任务=10，这里排在它们之后；
+    // 抽成常量是为了别人加条目时能一眼看出被谁占着（审查 DES-3）。
+    var ENTRY_ORDER = 20;
 
     // ── 选择器 / 数据属性常量表（升级断链只改这一处）──────────────
     var SEL = {
@@ -64,6 +68,23 @@ window.__ModuleLoader__.load({
       page: "data-snm-page",
       pageRow: "data-snm-page-row",
       pageId: "data-snm-page-id",
+      pageGlyph: "data-snm-page-glyph",
+      pageLabel: "data-snm-page-label",
+      pageGroup: "data-snm-page-group",
+      pageBadge: "data-snm-page-badge",
+      pageHidden: "data-snm-page-hidden",
+      pageBusy: "data-snm-page-busy",
+      pageHead: "data-snm-page-head",
+      pageTitle: "data-snm-page-title",
+      pageCount: "data-snm-page-count",
+      pageHint: "data-snm-page-hint",
+      pageList: "data-snm-page-list",
+      pageFoot: "data-snm-page-foot",
+      pageEmpty: "data-snm-page-empty",
+      pageError: "data-snm-page-error",
+      pageErrorText: "data-snm-page-error-text",
+      pageErrorRetry: "data-snm-page-error-retry",
+      pageEntryOff: "data-snm-page-entry-off",
     };
 
     var ZONE_EYE = 40; // 命中眼睛分区（相对行右侧，px）
@@ -104,6 +125,8 @@ window.__ModuleLoader__.load({
         entryShowHint: "隐藏左侧插件栏的「设置导航」入口",
         entryHideHint: "重新显示左侧插件栏的「设置导航」入口",
         entryFailed: "侧栏入口切换失败，请稍后重试",
+        entryOffBanner: "左侧插件栏入口已隐藏",
+        entryRestore: "恢复入口",
       },
       en: {
         gear: "Edit navigation",
@@ -135,6 +158,8 @@ window.__ModuleLoader__.load({
         entryShowHint: "Hide the “Settings navigation” row in the left sidebar",
         entryHideHint: "Show the “Settings navigation” row in the left sidebar again",
         entryFailed: "Could not toggle the sidebar entry — try again",
+        entryOffBanner: "Sidebar entry is hidden",
+        entryRestore: "Restore entry",
       },
     };
 
@@ -152,8 +177,13 @@ window.__ModuleLoader__.load({
     function num(x) {
       return typeof x === "number" && isFinite(x) ? x : 0;
     }
-    function dbg(where, err) {
-      try {
+    // 双向控制符 / 零宽字符 / 行内控制码：第三方分区的 label 会原样进 DOM，
+    // U+202E 这类字符能把文字顺序倒过来骗人（审查 SEC-4，1.0.3 的 DES-8 同源）。
+    var UNSAFE_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+    function cleanText(s) {
+      return isStr(s) ? s.replace(UNSAFE_TEXT, "") : "";
+    }
+    function dbg(where, err) {      try {
         console.debug("[settings-nav-manager] " + where, err);
       } catch (e) {}
     }
@@ -599,9 +629,21 @@ window.__ModuleLoader__.load({
         "  outline:2px solid var(--dsw-alias-accent,#247bbf);outline-offset:1px;",
         "}",
         // ── 侧栏入口对应的 main 页面（纯自有节点，不依赖宿主类名）──
-        "[data-snm-page]{height:100%;overflow:auto;box-sizing:border-box;padding:24px 28px;",
+        // 宿主在 main 面板上盖了一层窗口框架（标题栏/红绿灯）：入口页必须自己
+        // 让开这块留白，否则 Windows 会压住标题、macOS 会遮住按钮（审查 DES-1）。
+        "[data-snm-page]{height:100%;overflow:auto;box-sizing:border-box;",
+        "  padding:calc(var(--dsh-frame-top-clearance,48px) + 8px)",
+        "    calc(var(--dsh-frame-leading-clearance,0px) + 28px) 24px;",
         "  color:var(--dsw-alias-label-primary,#ccc);font-family:inherit;}",
         "[data-snm-page-head]{display:flex;align-items:center;gap:10px;margin:0 0 6px;}",
+        "[data-snm-page-head][data-window-drag]{-webkit-app-region:drag;}",
+        "[data-snm-page-entry-off]{margin:0 0 14px;padding:8px 10px;display:flex;align-items:center;gap:10px;",
+        "  max-width:640px;border:1px dashed var(--dsw-alias-border,rgba(128,128,128,.45));border-radius:6px;",
+        "  font-size:12px;color:var(--dsw-alias-label-secondary,#888);}",
+        "[data-snm-page-entry-off] span{flex:1;}",
+        "[data-snm-page-entry-off] button{margin:0;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px;",
+        "  border:1px solid var(--dsw-alias-border,rgba(128,128,128,.45));border-radius:6px;",
+        "  background:transparent;color:inherit;}",
         "[data-snm-page-title]{margin:0;font-size:16px;line-height:24px;font-weight:600;}",
         "[data-snm-page-count]{flex:none;padding:1px 8px;border-radius:999px;font-size:12px;",
         "  border:1px solid var(--dsw-alias-border,rgba(128,128,128,.35));",
@@ -631,6 +673,14 @@ window.__ModuleLoader__.load({
         "[data-snm-page-foot] button:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.08));}",
         "[data-snm-page-foot] button:focus-visible{outline:2px solid var(--dsw-alias-accent,#247bbf);outline-offset:1px;}",
         "[data-snm-page-empty]{margin:12px 0;font-size:13px;color:var(--dsw-alias-label-secondary,#888);}",
+        "[data-snm-page-error]{margin:10px 0;padding:8px 10px;display:flex;align-items:center;gap:10px;",
+        "max-width:640px;border:1px solid var(--dsw-alias-danger,#c0392b);border-radius:6px;",
+        "font-size:12px;color:var(--dsw-alias-danger,#c0392b);}",
+        "[data-snm-page-error-text]{flex:1;}",
+        "[data-snm-page-error] button{margin:0;padding:5px 10px;cursor:pointer;font:inherit;font-size:12px;",
+        "color:inherit;background:transparent;border:1px solid currentColor;border-radius:6px;}",
+        "[data-snm-page-row][data-snm-page-busy=\"1\"]{opacity:.6;}",
+        "[data-snm-page-row][aria-current=\"true\"]{border-color:var(--dsw-alias-danger,#c0392b);}",
         // 屏读文本
         "[data-snm-sr]{position:absolute;width:1px;height:1px;margin:-1px;padding:0;",
         "  overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;}",
@@ -667,6 +717,29 @@ window.__ModuleLoader__.load({
       var lastSectionsSig = "";
       var rafId = 0;
       var cleanups = [];
+      var timers = [];
+      // 首次 loadState 落地前不注册侧栏入口：否则用户亲手隐藏的入口会先出现再消失
+      var stateLoaded = false;
+
+      // 定时器统一登记：卸载时全部清掉，不留空转的 setTimeout
+      function later(fn, ms) {
+        var id = setTimeout(function () {
+          var i = timers.indexOf(id);
+          if (i >= 0) timers.splice(i, 1);
+          if (!disposed) fn();
+        }, ms);
+        timers.push(id);
+        return id;
+      }
+      function clearTimers() {
+        while (timers.length) {
+          try {
+            clearTimeout(timers.pop());
+          } catch (e) {
+            dbg("clear timer", e);
+          }
+        }
+      }
 
       // ── 通知（齿轮组件订阅）──────────────────────────────────
       function publish() {
@@ -791,44 +864,83 @@ window.__ModuleLoader__.load({
       function failOpen() {
         setNotice(t ? t("openFailed") : DICT.zh.openFailed);
       }
+      // 只接受「当前投影里存在的分区 id」：宿主 openSection 不校验 id，
+      // 陈旧 id 会让设置打开但内容区空着，调用方还以为成功。
+      function isKnownSection(id) {
+        for (var i = 0; i < sections.length; i++) if (sections[i].id === id) return true;
+        return false;
+      }
+      // 宿主把选中态写在 navCell 的 aria-current 上；再按 label 校验一次，
+      // 防止「id 对上了但渲染没跟上」被当成成功。
+      function activeSectionId() {
+        var nav = findNav();
+        if (!nav) return "";
+        var cells = navCells(nav);
+        for (var i = 0; i < cells.length; i++) {
+          if (cells[i].getAttribute("aria-current") !== "true") continue;
+          var id = cells[i].getAttribute(DATA.id);
+          if (id) return id;
+          var label = rowLabel(cells[i]);
+          for (var j = 0; j < sections.length; j++) if (sections[j].label === label) return sections[j].id;
+        }
+        return "";
+      }
+      function pollUntil(test, budget) {
+        return new Promise(function (resolve) {
+          var left = budget;
+          (function step() {
+            if (disposed) return resolve(false);
+            var hit = false;
+            try {
+              hit = test() === true;
+            } catch (e) {
+              dbg("poll", e);
+            }
+            if (hit) return resolve(true);
+            if (left <= 0) return resolve(false);
+            left -= 1;
+            later(step, 40);
+          })();
+        });
+      }
+      // 兜底：先只求打开弹窗，再等分区渲染出来点一下，最后仍要核对选中态
+      function domOpen(sid) {
+        var actions = shellActionsOf();
+        if (actions && typeof actions.open === "function") {
+          try {
+            actions.open();
+          } catch (e) {
+            dbg("open settings", e);
+          }
+        }
+        return pollUntil(function () {
+          return clickNavCell(sid);
+        }, 16).then(function (clicked) {
+          if (!clicked) return false;
+          return pollUntil(function () {
+            return activeSectionId() === sid;
+          }, 8);
+        });
+      }
+      // 深链的唯一真值：Promise<boolean>。openSection 只保证改了 activeId，
+      // 不保证渲染出来 —— 所以派发后回 DOM 核对，核不上再兜底，都不行就 false。
       function openSettingsSection(id) {
         var sid = id === undefined || id === null ? "" : String(id);
-        if (!sid) return false;
+        if (!sid || !isKnownSection(sid)) return Promise.resolve(false);
         var actions = shellActionsOf();
         if (actions && typeof actions.openSection === "function") {
           try {
             actions.openSection(sid);
-            return true;
           } catch (e) {
             dbg("openSection", e);
           }
+          return pollUntil(function () {
+            return activeSectionId() === sid;
+          }, 8).then(function (ok) {
+            return ok ? true : domOpen(sid);
+          });
         }
-        // 没有 openSection：先只打开弹窗，再等分区渲染出来后点一下
-        var opened = false;
-        if (actions && typeof actions.open === "function") {
-          try {
-            actions.open();
-            opened = true;
-          } catch (e2) {
-            dbg("open settings", e2);
-          }
-        }
-        var attempts = 0;
-        (function retry() {
-          if (disposed) return;
-          if (clickNavCell(sid)) return;
-          if (!opened && !findNav()) {
-            if (attempts === 0) failOpen(); // 弹窗根本打不开：立刻报，别假装成功
-            return;
-          }
-          attempts++;
-          if (attempts <= 5) {
-            setTimeout(retry, 60);
-            return;
-          }
-          failOpen();
-        })();
-        return true;
+        return domOpen(sid);
       }
 
       // ── 侧栏入口的显隐（编辑模式里齿轮旁的开关）─────────────────
@@ -856,7 +968,7 @@ window.__ModuleLoader__.load({
               {
                 name: "sidebar.panellist",
                 id: PANEL_ID,
-                order: 20,
+                order: ENTRY_ORDER,
                 locale: NS,
                 label: function () {
                   return t ? t("panel") : DICT.zh.panel;
@@ -868,18 +980,34 @@ window.__ModuleLoader__.load({
         );
       }
       function syncEntry() {
-        var want = !entryHidden();
+        // 初次同步发生在 describe 返回之前，此时 state 还是空的默认态；
+        // 若无条件按它注册，用户隐藏过的入口会先冒出来再消失（闪一下）。
+        var want = stateLoaded && !entryHidden();
         if (want === entryRendered) return; // 幂等：状态没变就不动 DOM，免得侧栏闪
-        disposeEntry();
-        entryRendered = false;
-        if (!want) return;
+        if (!want) {
+          disposeEntry();
+          entryRendered = false;
+          return;
+        }
         try {
           renderEntry();
           entryRendered = true;
         } catch (e) {
-          // 宿主槽位拒绝注册时不能把异常甩进点击处理器里：退回「入口仍在」的状态
+          // 宿主拒绝注册：把 hideEntry 回滚回去并重试注册，否则「内存/磁盘/UI」
+          // 三方不一致 —— 入口没了、按钮却显示「显示中」（审查 COR-5）。
           dbg("entry register", e);
+          state = cloneState(state);
+          state.hideEntry = false;
+          entryRendered = false;
+          try {
+            renderEntry();
+            entryRendered = true;
+          } catch (e2) {
+            dbg("entry re-register", e2);
+          }
           report("entry", e, "entryFailed");
+          setNotice(t ? t("entryFailed") : DICT.zh.entryFailed);
+          persist();
         }
       }
       function setEntryHidden(hidden) {
@@ -1218,7 +1346,11 @@ window.__ModuleLoader__.load({
       }
       function loadState() {
         var rm = remote();
-        if (!rm || typeof rm.describe !== "function") return Promise.resolve();
+        if (!rm || typeof rm.describe !== "function") {
+          stateLoaded = true; // 没有 describe 也要放行入口，否则侧栏永远是空的
+          syncEntry();
+          return Promise.resolve();
+        }
         return Promise.resolve()
           .then(function () {
             return rm.describe();
@@ -1230,6 +1362,7 @@ window.__ModuleLoader__.load({
             state = createState(ns && ns.value);
             revision = ns && typeof ns.revision === "number" ? ns.revision : undefined;
             updateGroupSeq();
+            stateLoaded = true;
             sync();
           })
           .catch(function (err) {
@@ -1237,6 +1370,7 @@ window.__ModuleLoader__.load({
             state = createState(null);
             revision = undefined;
             updateGroupSeq();
+            stateLoaded = true;
             sync();
           });
       }
@@ -1970,6 +2104,34 @@ window.__ModuleLoader__.load({
             : function () {
                 return false;
               };
+        // 打开失败必须回执：深链是异步的，宿主可能根本不认这个分区，
+        // 静默失败会让用户以为点坏了（审查 COR-2）。
+        var openingState = react.useState("");
+        var opening = openingState[0];
+        var setOpening = openingState[1];
+        var failedState = react.useState("");
+        var failed = failedState[0];
+        var setFailed = failedState[1];
+        function go(id) {
+          if (!id || opening) return;
+          setOpening(id);
+          setFailed("");
+          Promise.resolve()
+            .then(function () {
+              return open(id);
+            })
+            .then(function (ok) {
+              if (disposed) return;
+              setOpening("");
+              setFailed(ok === true ? "" : id);
+            })
+            .catch(function (err) {
+              dbg("page open", err);
+              if (disposed) return;
+              setOpening("");
+              setFailed(id);
+            });
+        }
         var rows = flattenNav(sections, state);
         var visible = [];
         var hiddenCount = 0;
@@ -1989,19 +2151,22 @@ window.__ModuleLoader__.load({
               {
                 key: row.id,
                 type: "button",
-                "data-snm-page-row": "1",
-                "data-snm-page-id": row.id,
-                "data-snm-page-hidden": row.hidden ? "1" : "0",
+                [DATA.pageRow]: "1",
+                [DATA.pageId]: row.id,
+                [DATA.pageHidden]: row.hidden ? "1" : "0",
+                [DATA.pageBusy]: opening === row.id ? "1" : "0",
+                "aria-busy": opening === row.id ? "true" : "false",
+                "aria-current": failed === row.id ? "true" : "false",
                 onClick: (function (id) {
                   return function () {
-                    open(id);
+                    go(id);
                   };
                 })(row.id),
               },
-              h("span", { key: "g", "data-snm-page-glyph": "1", "aria-hidden": "true" }, glyphOf(row.label)),
-              h("span", { key: "l", "data-snm-page-label": "1" }, row.label || row.id),
-              row.group ? h("span", { key: "gr", "data-snm-page-group": "1" }, row.group) : null,
-              row.hidden ? h("span", { key: "b", "data-snm-page-badge": "1" }, tr("hidden")) : null,
+              h("span", { key: "g", [DATA.pageGlyph]: "1", "aria-hidden": "true" }, glyphOf(row.label)),
+              h("span", { key: "l", [DATA.pageLabel]: "1" }, cleanText(row.label) || row.id),
+              row.group ? h("span", { key: "gr", [DATA.pageGroup]: "1" }, cleanText(row.group)) : null,
+              row.hidden ? h("span", { key: "b", [DATA.pageBadge]: "1" }, tr("hidden")) : null,
             ),
           );
         }
@@ -2037,20 +2202,60 @@ window.__ModuleLoader__.load({
             ),
           );
         }
+        // 入口被隐藏时，这一页本身往往就是用户唯一的落脚点：
+        // 在这里给一个「恢复入口」的出口，免得只能靠 Ctrl+, 把自己救回来（审查 DES-4）。
+        var entryOffBanner = entryHidden()
+          ? h(
+              "div",
+              { [DATA.pageEntryOff]: "1", role: "status" },
+              h("span", { key: "m" }, tr("entryOffBanner")),
+              h(
+                "button",
+                {
+                  key: "b",
+                  type: "button",
+                  onClick: function () {
+                    setEntryHidden(false);
+                  },
+                },
+                tr("entryRestore"),
+              ),
+            )
+          : null;
         return h(
           "div",
-          { "data-snm-page": "1" },
+          { [DATA.page]: "1" },
           h(
             "div",
-            { "data-snm-page-head": "1" },
-            h("h2", { "data-snm-page-title": "1" }, tr("panel")),
-            h("span", { "data-snm-page-count": "1" }, String(visible.length)),
+            { [DATA.pageHead]: "1", "data-window-drag": "true" },
+            h("h2", { [DATA.pageTitle]: "1" }, tr("panel")),
+            h("span", { [DATA.pageCount]: "1" }, String(visible.length)),
           ),
-          h("p", { "data-snm-page-hint": "1" }, tr("pageHint")),
+          h("p", { [DATA.pageHint]: "1" }, tr("pageHint")),
+          entryOffBanner,
+          failed
+            ? h(
+                "div",
+                { [DATA.pageError]: "1", role: "alert" },
+                h("span", { key: "m", [DATA.pageErrorText]: "1" }, tr("openFailed")),
+                h(
+                  "button",
+                  {
+                    key: "r",
+                    type: "button",
+                    [DATA.pageErrorRetry]: "1",
+                    onClick: function () {
+                      go(failed);
+                    },
+                  },
+                  tr("retry"),
+                ),
+              )
+            : null,
           visible.length === 0
-            ? h("p", { "data-snm-page-empty": "1" }, tr("empty"))
-            : h("div", { "data-snm-page-list": "1" }, items),
-          foot.length ? h("div", { "data-snm-page-foot": "1" }, foot) : null,
+            ? h("p", { [DATA.pageEmpty]: "1" }, tr("empty"))
+            : h("div", { [DATA.pageList]: "1" }, items),
+          foot.length ? h("div", { [DATA.pageFoot]: "1" }, foot) : null,
         );
       }
 
@@ -2210,9 +2415,9 @@ window.__ModuleLoader__.load({
         });
       }, NS + ": gear");
       // 侧栏插件栏入口在 syncEntry() 里按 hideEntry 动态注册/注销
-      // （顺序 20 排在「插件」(0) /「插件市场」/「自动化任务」(10) 之后）。
+      // （ENTRY_ORDER=20，排在宿主的「插件」(0) /「自动化任务」(10) 之后）。
       // 该入口对应的页面：没有它，layout.selectPanel 会抛
-      // `main panel "settings-nav" is not registered`。
+      // `main panel "<PANEL_ID>" is not registered`。
       // 页面始终在册，隐藏入口只摘侧栏那一行。
       ctx.effect(function () {
         return ctx.slots.inject("main", function () {
@@ -2241,6 +2446,7 @@ window.__ModuleLoader__.load({
           if (rafId && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
           rafId = 0;
           disposeEntry(); // 侧栏入口是动态注册的，得自己摘
+          clearTimers(); // 轮询/重试的定时器全部作废
           if (noticeTimer) clearTimeout(noticeTimer);
           noticeTimer = null;
           while (cleanups.length) {
@@ -2291,7 +2497,10 @@ window.__ModuleLoader__.load({
     exports.__test = {
       NS: NS,
       PANEL_ID: PANEL_ID,
+      ENTRY_ORDER: ENTRY_ORDER,
       DICT: DICT,
+      cleanText: cleanText,
+      DATA: DATA,
       buildCss: buildCss,
       createState: createState,
       normalizeState: normalizeState,

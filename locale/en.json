@@ -31,5 +31,7 @@
   "entryOff": "Hidden",
   "entryShowHint": "Hide the “Settings navigation” row in the left sidebar",
   "entryHideHint": "Show the “Settings navigation” row in the left sidebar again",
-  "entryFailed": "Could not toggle the sidebar entry — try again"
+  "entryFailed": "Could not toggle the sidebar entry — try again",
+  "entryOffBanner": "Sidebar entry is hidden",
+  "entryRestore": "Restore entry"
 }

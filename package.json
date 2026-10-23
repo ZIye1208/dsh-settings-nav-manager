@@ -1,6 +1,6 @@
 {
   "name": "dsh-settings-nav-manager",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": false,
   "license": "MIT",
   "description": "DSH 设置页导航管理插件 —— 拖拽排序 · 显隐 · 抽屉收纳 · 持久化 · 侧栏快捷入口",

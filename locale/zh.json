@@ -31,5 +31,7 @@
   "entryOff": "已隐藏",
   "entryShowHint": "隐藏左侧插件栏的「设置导航」入口",
   "entryHideHint": "重新显示左侧插件栏的「设置导航」入口",
-  "entryFailed": "侧栏入口切换失败，请稍后重试"
+  "entryFailed": "侧栏入口切换失败，请稍后重试",
+  "entryOffBanner": "左侧插件栏入口已隐藏",
+  "entryRestore": "恢复入口"
 }
