@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>dsh-settings-nav-manager harness</title>
+<style>
+  body { margin: 0; font-family: system-ui; background: #1e1e1e; color: #ddd; }
+  .xx_nav { width: 188px; padding: 22px 12px 0; box-sizing: border-box; }
+  .xx_navList { display: flex; flex-direction: column; gap: 4px; width: 164px; }
+  .xx_navCell {
+    display: flex; align-items: center; gap: 8px; height: 40px; width: 100%;
+    padding: 9px 16px 9px 12px; box-sizing: border-box; border: 0; border-radius: 6px;
+    background: transparent; color: #ddd; font-size: 14px; text-align: left; cursor: pointer;
+  }
+  .xx_navLabel { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .xx_header { display: flex; justify-content: flex-end; gap: 8px; height: 54px; padding: 20px 14px 8px 10px; box-sizing: border-box; }
+  .xx_actions { display: flex; align-items: center; gap: 8px; }
+</style>
+</head>
+<body>
+<script>
+  window.__ModuleLoader__ = { load: function (m) { window.__mod = m; } };
+  window.__errors = [];
+  window.addEventListener("error", function (e) { window.__errors.push(String(e.message)); });
+</script>
+<script>
+(function () {
+  var v = new URLSearchParams(location.search).get("v") || "new";
+  var s = document.createElement("script");
+  s.src = v === "old" ? "./legacy.js" : "./under-test.js";
+  s.onload = function () { window.__loaded = v; };
+  s.onerror = function () { window.__loadError = s.src; };
+  document.head.appendChild(s);
+})();
+</script>
+<script src="./harness.js"></script>
+</body>
+</html>

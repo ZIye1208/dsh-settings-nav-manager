@@ -5,9 +5,18 @@
   },
   "gear": "编辑导航",
   "gearExit": "退出编辑导航",
+  "editHint": "拖拽排序 · 点眼睛隐藏 · 双击改名 · 可收纳",
+  "keyboardHint": "Alt+↑/↓ 排序 · h 显隐 · Enter 折叠 · F2 改名",
   "hidden": "已隐藏",
   "show": "显示",
   "hide": "隐藏",
   "handle": "拖动以排序",
-  "reset": "恢复默认"
+  "reset": "恢复默认",
+  "resetDone": "已恢复默认顺序",
+  "saved": "已保存",
+  "saveFailed": "未能保存排版，重启后可能丢失",
+  "recognizeFailed": "导航结构变化，暂未应用整理",
+  "newGroup": "新抽屉",
+  "addGroup": "＋ 新建抽屉",
+  "dissolve": "解散抽屉"
 }

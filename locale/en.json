@@ -1,13 +1,22 @@
 {
   "meta": {
-    "title": "Settings Nav Manager",
-    "description": "Reorder, hide, and group the navigation tabs in the settings page."
+    "title": "Settings navigation manager",
+    "description": "Reorder, hide and group the settings navigation tabs."
   },
   "gear": "Edit navigation",
   "gearExit": "Exit navigation editing",
+  "editHint": "Drag to reorder · Click eye to hide · Double-click to rename · Collect into drawers",
+  "keyboardHint": "Alt+↑/↓ reorder · h hide · Enter collapse · F2 rename",
   "hidden": "Hidden",
   "show": "Show",
   "hide": "Hide",
   "handle": "Drag to reorder",
-  "reset": "Reset to default"
+  "reset": "Reset to default",
+  "resetDone": "Default order restored",
+  "saved": "Saved",
+  "saveFailed": "Layout not saved — it may be lost after restart",
+  "recognizeFailed": "Navigation changed; layout not applied yet",
+  "newGroup": "New drawer",
+  "addGroup": "+ New drawer",
+  "dissolve": "Dissolve drawer"
 }

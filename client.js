@@ -1,11 +1,21 @@
 // dsh-settings-nav-manager — client (web)
-// P1: 齿轮编辑模式 + 拖拽排序 + 条目显隐 + 持久化。
+// 齿轮编辑模式 + 拖拽排序 + 条目显隐 + 抽屉收纳 + 持久化。
 //
 // 设计约束（来自 dsh-pet / dshmarket 实证）：
 //  * 绝不改写 React 管理的 nav DOM 结构（replaceWith / removeChild 会抛 NotFoundError）。
 //  * 只加 data-* 属性 + 注入 CSS（伪元素画字形），交互走坐标命中 + 事件委托。
-//  * 认行靠 label 文本 / DOM 序号映射到 settings.section 的 options.id。
-//  * 选择器全部收敛到 SEL 常量表，升级断链只改这一处。
+//  * 认行靠 label 文本 / DOM 序号双向校验映射到 settings.section 的 options.id。
+//  * 选择器全部收敛到 SEL / DATA 常量表，升级断链只改这一处。
+//
+// v1.0.1 修复（详见 CHANGELOG.md）：
+//  * P0 冷启动丢数据：sections 投影不再依赖 nav 是否挂载；分区未知时 normalize 不裁剪、
+//    persist 直接拒写。
+//  * 持久化失败可见：save / conflict / 认行失配都会 report 一次（console.debug + 齿轮旁提示）。
+//  * 写入带 revision，撞 SETTINGS_CONFLICT 时重读重放一次。
+//  * 拖拽补 pointercancel / blur 兜底，拖拽中按快照重算，取消可完整回滚。
+//  * MutationObserver 从「全文档子树」收敛到「body 直接子节点 + nav 自身」，并 rAF 合并。
+//  * 键盘可达：Alt+↑/↓ 排序、h 显隐、Enter/Space 折叠、F2 改名、Escape 让路给输入框。
+//  * 新增「恢复默认」入口；抽屉名与状态全部走 textContent，不再拼接选择器。
 window.__ModuleLoader__.load({
   id: "dsh-settings-nav-manager",
   factory: function (require) {
@@ -16,106 +26,413 @@ window.__ModuleLoader__.load({
     var h = react.createElement;
 
     var NS = "settings-nav-manager";
+    var STYLE_TAG = "settings-nav-manager-style";
 
-    // ── 选择器常量表（升级断链只改这一处）────────────────────────
+    // ── 选择器 / 数据属性常量表（升级断链只改这一处）──────────────
     var SEL = {
       panel: '[data-shortcut-modal="settings"]',
       navList: '[class*="navList"]',
       navCell: '[class*="navCell"]',
       navLabel: '[class*="navLabel"]',
     };
-    // 命中分区（相对行右侧，单位 px）：handle 在最右，eye 紧邻其左。
-    var ZONE_EYE = 40;
-    // 描线 SVG 图标（mask + background-color:currentColor，随主题变色，与设置页线性图标一致）。
-    // 用 ::after 画，彻底避开 dsh-pet/dshmarket 占用的 ::before（见 nav-icon 注释）。
-    var ICON_EYE =
-      "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z'/><circle cx='12' cy='12' r='2.5'/></svg>";
-    var ICON_EYE_OFF =
-      "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z'/><circle cx='12' cy='12' r='2.5'/><line x1='3.5' y1='3.5' x2='20.5' y2='20.5'/></svg>";
+    var DATA = {
+      nav: "data-snm-nav",
+      editing: "data-snm-editing",
+      row: "data-snm-row",
+      id: "data-snm-id",
+      hidden: "data-snm-hidden",
+      inGroup: "data-snm-in-group",
+      collapsed: "data-snm-collapsed",
+      dragging: "data-snm-dragging",
+      group: "data-snm-group",
+      groupId: "data-snm-group-id",
+      groupName: "data-snm-group-name",
+      groupToggle: "data-snm-group-toggle",
+      groupInput: "data-snm-group-input",
+      groupDissolve: "data-snm-group-dissolve",
+      renaming: "data-snm-renaming",
+      addGroup: "data-snm-add-group",
+      reset: "data-snm-reset",
+      drop: "data-snm-drop",
+      gear: "data-snm-gear",
+      notice: "data-snm-notice",
+      sr: "data-snm-sr",
+    };
+
+    var ZONE_EYE = 40; // 命中眼睛分区（相对行右侧，px）
     var DRAG_THRESHOLD = 6; // >6px 判拖拽，低于阈值放行普通点击
-    var STYLE_TAG = "settings-nav-manager-style";
+    var RENAME_MAX = 32;
+    var TAP_GUARD_MS = 350; // 拖拽后吞掉紧随 click 的时间窗
+    var NOTICE_MS = 4000;
 
-    // ── 运行时文案（走 Client locale）────────────────────────────
-    var zh = {
-      gear: "编辑导航",
-      gearExit: "退出编辑导航",
-      editHint: "拖拽排序 · 点眼睛隐藏 · 双击改名 · 可收纳",
-      hidden: "已隐藏",
-      show: "显示",
-      hide: "隐藏",
-      handle: "拖动以排序",
-      reset: "恢复默认",
-      newGroup: "新抽屉",
-      addGroup: "＋ 新建抽屉",
-      dissolve: "解散抽屉",
+    // ── 文案（单一事实来源：locale/*.json 由 test/locale.test.mjs 校验一致性）──
+    var DICT = {
+      zh: {
+        gear: "编辑导航",
+        gearExit: "退出编辑导航",
+        editHint: "拖拽排序 · 点眼睛隐藏 · 双击改名 · 可收纳",
+        keyboardHint: "Alt+↑/↓ 排序 · h 显隐 · Enter 折叠 · F2 改名",
+        hidden: "已隐藏",
+        show: "显示",
+        hide: "隐藏",
+        handle: "拖动以排序",
+        reset: "恢复默认",
+        resetDone: "已恢复默认顺序",
+        saved: "已保存",
+        saveFailed: "未能保存排版，重启后可能丢失",
+        recognizeFailed: "导航结构变化，暂未应用整理",
+        newGroup: "新抽屉",
+        addGroup: "＋ 新建抽屉",
+        dissolve: "解散抽屉",
+      },
+      en: {
+        gear: "Edit navigation",
+        gearExit: "Exit navigation editing",
+        editHint: "Drag to reorder · Click eye to hide · Double-click to rename · Collect into drawers",
+        keyboardHint: "Alt+↑/↓ reorder · h hide · Enter collapse · F2 rename",
+        hidden: "Hidden",
+        show: "Show",
+        hide: "Hide",
+        handle: "Drag to reorder",
+        reset: "Reset to default",
+        resetDone: "Default order restored",
+        saved: "Saved",
+        saveFailed: "Layout not saved — it may be lost after restart",
+        recognizeFailed: "Navigation changed; layout not applied yet",
+        newGroup: "New drawer",
+        addGroup: "+ New drawer",
+        dissolve: "Dissolve drawer",
+      },
     };
-    var en = {
-      gear: "Edit navigation",
-      gearExit: "Exit navigation editing",
-      editHint: "Drag to reorder · Click eye to hide · Double-click to rename · Collect into drawers",
-      hidden: "Hidden",
-      show: "Show",
-      hide: "Hide",
-      handle: "Drag to reorder",
-      reset: "Reset to default",
-      newGroup: "New drawer",
-      addGroup: "+ New drawer",
-      dissolve: "Dissolve drawer",
-    };
 
-    // ── 模块态（临时态，不持久化；持久化只有 order/hidden）──────
-    var editing = false;
-    var state = { order: [], groups: [], hidden: [] }; // 持久化态
-    var groupSeq = 1; // 抽屉 id 自增（"g-N"）
-    var sections = []; // [{id, order, label}] 由 entries 投影
-    var editingSubs = [];
-    var ctxRef = null;
-    var t = null;
+    // ── 纯工具 ────────────────────────────────────────────────
+    function isStr(x) {
+      return typeof x === "string";
+    }
+    // 无原型链的字典：id / label 作键时不会被 constructor、__proto__ 命中
+    function dict() {
+      return Object.create(null);
+    }
+    function own(map, key) {
+      return key !== undefined && key !== null && Object.prototype.hasOwnProperty.call(map, key);
+    }
+    function num(x) {
+      return typeof x === "number" && isFinite(x) ? x : 0;
+    }
+    function dbg(where, err) {
+      try {
+        console.debug("[settings-nav-manager] " + where, err);
+      } catch (e) {}
+    }
+    function countKeys(map) {
+      var n = 0;
+      for (var k in map) n++;
+      return n;
+    }
+    function cloneState(s) {
+      return {
+        version: 1,
+        order: s.order.slice(),
+        groups: s.groups.map(function (g) {
+          return { id: g.id, name: g.name, collapsed: !!g.collapsed, items: g.items.slice() };
+        }),
+        hidden: s.hidden.slice(),
+      };
+    }
+    function findGroup(state, id) {
+      for (var i = 0; i < state.groups.length; i++) if (state.groups[i].id === id) return state.groups[i];
+      return null;
+    }
+    function isGroupTop(state, id) {
+      return findGroup(state, id) !== null;
+    }
 
-    function notifyEditing() {
-      for (var i = 0; i < editingSubs.length; i++) {
-        try {
-          editingSubs[i](editing);
-        } catch (e) {}
+    // ── sections 投影：只依赖 ctx，与 DOM 是否挂载无关（P0 根因）────
+    function projectSections(ctx) {
+      var out = [];
+      var entries;
+      try {
+        entries = ctx.slots.entries("settings.section");
+      } catch (e) {
+        dbg("entries", e);
+        return out;
+      }
+      for (var i = 0; i < entries.length; i++) {
+        var o = entries[i] && entries[i].options ? entries[i].options : {};
+        var lbl = o.label;
+        if (typeof lbl === "function") {
+          try {
+            lbl = lbl();
+          } catch (e2) {
+            dbg("label", e2);
+            lbl = "";
+          }
+        }
+        out.push({
+          id: o.id ? String(o.id) : "",
+          order: num(o.order),
+          label: lbl ? String(lbl) : "",
+        });
+      }
+      out.sort(function (a, b) {
+        return a.order - b.order;
+      });
+      return out;
+    }
+
+    function knownIdsFrom(sections) {
+      var set = dict();
+      for (var i = 0; i < sections.length; i++) if (sections[i].id) set[sections[i].id] = 1;
+      return set;
+    }
+    function sectionIds(sections) {
+      var out = [];
+      for (var i = 0; i < sections.length; i++) if (sections[i].id) out.push(sections[i].id);
+      return out;
+    }
+
+    // ── 持久化态：读取归一化（纯函数，异常输入一律回退默认）─────────
+    function createState(raw) {
+      var v = raw && typeof raw === "object" ? raw : {};
+      var groups = [];
+      if (Array.isArray(v.groups)) {
+        for (var i = 0; i < v.groups.length; i++) {
+          var g = v.groups[i];
+          if (!g || !isStr(g.id) || !g.id) continue;
+          groups.push({
+            id: String(g.id),
+            name: isStr(g.name) ? String(g.name) : "",
+            collapsed: !!g.collapsed,
+            items: Array.isArray(g.items) ? g.items.filter(isStr) : [],
+          });
+        }
+      }
+      return {
+        version: 1,
+        order: Array.isArray(v.order) ? v.order.filter(isStr) : [],
+        groups: groups,
+        hidden: Array.isArray(v.hidden) ? v.hidden.filter(isStr) : [],
+      };
+    }
+
+    // ── 归一化（纯函数）：known 为空时原样返回，绝不裁剪 ───────────
+    // v1.0.0 的数据丢失就发生在这里：设置面板未挂载时 sections 为空，
+    // 旧实现拿空 known 去过滤，把 order / groups.items / hidden 全清掉。
+    function normalizeState(state, known, sectionOrder) {
+      var next = cloneState(state);
+      if (countKeys(known) === 0) return next; // 不知道合法 id 域 → 什么都不动
+
+      var placed = dict();
+      var gi, ii, id, oi, top;
+
+      // 1) 组内成员：只去重，不因为「此刻没见到这个分区」就丢掉。
+      //    分区是各插件在各自 apply 里注册的，启动早期 sections 可能只到一半；
+      //    此时裁剪 = 又一次静默丢数据。真正的非法 id 由写盘前的 serializeState 过滤。
+      for (gi = 0; gi < next.groups.length; gi++) {
+        var g = next.groups[gi];
+        var ng = [];
+        for (ii = 0; ii < g.items.length; ii++) {
+          id = g.items[ii];
+          if (!own(placed, id)) {
+            placed[id] = 1;
+            ng.push(id);
+          }
+        }
+        g.items = ng;
+      }
+
+      // 2) 顶层顺序：抽屉保序、分区保序、去重（未知 id 原样保留在原位）
+      var newOrder = [];
+      var seenTop = dict();
+      for (oi = 0; oi < next.order.length; oi++) {
+        top = next.order[oi];
+        if (isGroupTop(next, top)) {
+          if (!own(seenTop, top)) {
+            seenTop[top] = 1;
+            newOrder.push(top);
+          }
+        } else if (!own(placed, top) && !own(seenTop, top)) {
+          placed[top] = 1; // 标记已落位，避免第 3 步重复追加
+          seenTop[top] = 1;
+          newOrder.push(top);
+        }
+      }
+
+      // 3) 新分区：按宿主 options.order 追加到末尾
+      var hostOrder = sectionOrder || [];
+      for (gi = 0; gi < hostOrder.length; gi++) {
+        id = hostOrder[gi];
+        if (own(known, id) && !own(placed, id)) {
+          placed[id] = 1;
+          newOrder.push(id);
+        }
+      }
+
+      // 4) 有抽屉但不在 order 里的，补到末尾
+      for (gi = 0; gi < next.groups.length; gi++) {
+        var gid = next.groups[gi].id;
+        if (!own(seenTop, gid)) {
+          seenTop[gid] = 1;
+          newOrder.push(gid);
+        }
+      }
+
+      next.order = newOrder;
+      // 隐藏表同样只去重；已卸载插件的 id 留到写盘时再清
+      var seenHidden = dict();
+      next.hidden = next.hidden.filter(function (id2) {
+        if (own(seenHidden, id2)) return false;
+        seenHidden[id2] = 1;
+        return true;
+      });
+      return next;
+    }
+
+    // ── 写前序列化（纯函数）：known 为空时返回 null = 拒绝写入 ──────
+    function serializeState(state, known) {
+      if (countKeys(known) === 0) return null; // 不知道合法 id 域时，宁可不写
+      return {
+        order: state.order.filter(function (id) {
+          return own(known, id) || isGroupTop(state, id);
+        }),
+        groups: state.groups.map(function (g) {
+          return {
+            id: g.id,
+            name: g.name,
+            collapsed: !!g.collapsed,
+            items: g.items.filter(function (id) {
+              return own(known, id);
+            }),
+          };
+        }),
+        hidden: state.hidden.filter(function (id) {
+          return own(known, id);
+        }),
+      };
+    }
+
+    // ── 拖拽落点应用（纯函数：基于快照重算，天然可回滚）─────────────
+    function removeIdEverywhere(state, id) {
+      var oi = state.order.indexOf(id);
+      if (oi >= 0) state.order.splice(oi, 1);
+      for (var i = 0; i < state.groups.length; i++) {
+        var gi = state.groups[i].items.indexOf(id);
+        if (gi >= 0) state.groups[i].items.splice(gi, 1);
       }
     }
 
-    // ── 样式注入（幂等，data-plugin-css 查重）───────────────────
-    function injectStyles() {
-      if (!document || !document.head) return;
-      var existing = document.querySelector(
-        'style[data-plugin-css="' + STYLE_TAG + '"]',
-      );
-      if (existing) return;
-      var tag = document.createElement("style");
-      tag.dataset.plugin = NS;
-      tag.dataset.pluginCss = STYLE_TAG;
-      var eyeOpen = 'url("data:image/svg+xml,' + encodeURIComponent(ICON_EYE) + '")';
-      var eyeOff = 'url("data:image/svg+xml,' + encodeURIComponent(ICON_EYE_OFF) + '")';
-      tag.textContent = [
+    function applyDropTo(state, drag, drop) {
+      var next = cloneState(state);
+      if (!drop) return next;
+      if (drag.isGroup) {
+        var gid = drag.id;
+        var cur = next.order.indexOf(gid);
+        var target = null;
+        if (drop.type === "insert-end") target = next.order.length;
+        else if (drop.type === "insert-before") {
+          var refTop = drop.refType === "row" && drop.refGroup ? drop.refGroup : drop.refId;
+          target = next.order.indexOf(refTop);
+          if (target < 0) target = next.order.length;
+          else if (cur >= 0 && cur < target) target -= 1;
+        } else if (drop.type === "into-group") {
+          // 抽屉不能嵌抽屉 → 视作插到该抽屉前
+          target = next.order.indexOf(drop.groupId);
+          if (target < 0) target = next.order.length;
+          else if (cur >= 0 && cur < target) target -= 1;
+        }
+        if (target === null) return next;
+        if (cur >= 0) next.order.splice(cur, 1);
+        if (target > next.order.length) target = next.order.length;
+        if (target < 0) target = 0;
+        next.order.splice(target, 0, gid);
+        return next;
+      }
+
+      removeIdEverywhere(next, drag.id);
+      if (drop.type === "into-group") {
+        var g = findGroup(next, drop.groupId);
+        if (g) g.items.push(drag.id);
+        else next.order.push(drag.id);
+      } else if (drop.type === "insert-end") {
+        next.order.push(drag.id);
+      } else if (drop.type === "insert-before") {
+        if (drop.refType === "group") {
+          var p = next.order.indexOf(drop.refId);
+          if (p < 0) p = next.order.length;
+          next.order.splice(p, 0, drag.id);
+        } else if (drop.refGroup) {
+          var g2 = findGroup(next, drop.refGroup);
+          if (g2) {
+            var ip = g2.items.indexOf(drop.refId);
+            if (ip < 0) ip = g2.items.length;
+            g2.items.splice(ip, 0, drag.id);
+          } else {
+            next.order.push(drag.id);
+          }
+        } else {
+          var p2 = next.order.indexOf(drop.refId);
+          if (p2 < 0) p2 = next.order.length;
+          next.order.splice(p2, 0, drag.id);
+        }
+      }
+      return next;
+    }
+
+    // 键盘微调：在同一容器内与邻居交换（无容器则不动）
+    function nudgeState(state, id, delta) {
+      var next = cloneState(state);
+      var list = null;
+      var idx = next.order.indexOf(id);
+      if (idx >= 0) list = next.order;
+      else {
+        for (var i = 0; i < next.groups.length; i++) {
+          var gi = next.groups[i].items.indexOf(id);
+          if (gi >= 0) {
+            list = next.groups[i].items;
+            idx = gi;
+            break;
+          }
+        }
+      }
+      if (!list) return next;
+      var to = idx + delta;
+      if (to < 0 || to >= list.length) return next;
+      var tmp = list[to];
+      list[to] = list[idx];
+      list[idx] = tmp;
+      return next;
+    }
+
+    // ── 样式（纯字符串，便于测试）────────────────────────────────
+    function buildCss() {
+      var eyeOpen =
+        "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z'/><circle cx='12' cy='12' r='2.5'/></svg>";
+      var eyeOff =
+        "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z'/><circle cx='12' cy='12' r='2.5'/><line x1='3.5' y1='3.5' x2='20.5' y2='20.5'/></svg>";
+      var on = 'url("data:image/svg+xml,' + encodeURIComponent(eyeOpen) + '")';
+      var off = 'url("data:image/svg+xml,' + encodeURIComponent(eyeOff) + '")';
+      return [
         // 容器：确保 flex column，order 生效
         "[data-snm-nav]{display:flex;flex-direction:column;}",
-        // 行定位上下文（伪元素锚点）
         "[data-snm-row]{position:relative;}",
-        // 编辑模式：眼睛（::after，描线 SVG + currentColor 随主题）。
-        // pet/market 只用 ::before，故用 ::after 不撞，::before 完全让给它们。
+        // 编辑模式：眼睛（::after，描线 SVG + currentColor 随主题）
         '[data-snm-editing="1"] [data-snm-row]::after{',
         '  content:"";position:absolute;right:20px;top:0;bottom:0;width:18px;',
         "  background-color:currentColor;opacity:.72;pointer-events:none;",
-        "  -webkit-mask:" + eyeOpen + " center/contain no-repeat;",
-        "  mask:" + eyeOpen + " center/contain no-repeat;",
+        "  -webkit-mask:" + on + " center/contain no-repeat;",
+        "  mask:" + on + " center/contain no-repeat;",
         "}",
-        // 隐藏：换“划线眼”，眼睛常驻（保留可见、可点回），不再消失
+        // 隐藏：换「划线眼」，眼睛常驻（保留可见、可点回）
         '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"]::after{',
-        "  -webkit-mask:" + eyeOff + " center/contain no-repeat;",
-        "  mask:" + eyeOff + " center/contain no-repeat;",
+        "  -webkit-mask:" + off + " center/contain no-repeat;",
+        "  mask:" + off + " center/contain no-repeat;",
         "  opacity:.9;",
         "}",
-        // 隐藏：只置灰内容（标签/导航图标），眼睛保持亮，方便一眼看到恢复按钮
+        // 隐藏：只置灰内容，眼睛保持亮
         '[data-snm-row][data-snm-hidden="1"] [class*="navLabel"],',
         '[data-snm-row][data-snm-hidden="1"] [class*="navIcon"]{opacity:.42;}',
         '[data-snm-editing="0"] [data-snm-row][data-snm-hidden="1"]{display:none;}',
-        // 编辑模式：预留右侧眼睛位 + 标签截断（长名字不盖眼睛）
+        // 编辑模式：预留眼睛位 + 标签截断
         '[data-snm-editing="1"] [data-snm-row]{padding-right:52px;}',
         '[data-snm-editing="1"] [class*="navLabel"]{',
         "  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
@@ -127,7 +444,7 @@ window.__ModuleLoader__.load({
         "  outline-offset:-1px;cursor:grabbing;",
         "}",
         '[data-snm-editing="1"] [data-snm-row]{cursor:grab;}',
-        // ── 抽屉（命名分组）：头 =「▾ 抽屉名 … ×」插件自有节点 ──
+        // 抽屉头
         "[data-snm-group]{",
         "  display:flex;align-items:center;gap:8px;margin:2px 0;height:40px;",
         "  padding:0 12px;border-radius:6px;cursor:grab;position:relative;",
@@ -135,14 +452,14 @@ window.__ModuleLoader__.load({
         "  font-family:inherit;font-size:14px;line-height:22px;font-weight:400;color:var(--dsw-alias-label-primary,#ccc);",
         "}",
         '[data-snm-group][data-snm-dragging="1"]{opacity:.6;outline:1px dashed var(--dsw-alias-accent,#247bbf);outline-offset:-1px;cursor:grabbing;}',
-        '[data-snm-group-toggle]{cursor:pointer;user-select:none;flex:none;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;}',
-        '[data-snm-group-name]{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:400;color:var(--dsw-alias-label-primary,#ccc);}',
-        '[data-snm-group-input]{flex:1 1 auto;min-width:0;font:inherit;color:inherit;background:var(--dsw-alias-bg-layer-2,#222);border:1px solid var(--dsw-alias-accent,#247bbf);border-radius:4px;padding:2px 4px;}',
-        '[data-snm-group-dissolve]{flex:none;opacity:0;cursor:pointer;background:transparent;border:none;color:var(--dsw-alias-label-secondary,#888);font-size:14px;line-height:1;padding:2px 5px;border-radius:4px;}',
+        "[data-snm-group-toggle]{cursor:pointer;user-select:none;flex:none;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;}",
+        "[data-snm-group-name]{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:400;color:var(--dsw-alias-label-primary,#ccc);}",
+        "[data-snm-group-input]{flex:1 1 auto;min-width:0;font:inherit;color:inherit;background:var(--dsw-alias-bg-layer-2,#222);border:1px solid var(--dsw-alias-accent,#247bbf);border-radius:4px;padding:2px 4px;}",
+        "[data-snm-group-dissolve]{flex:none;opacity:0;cursor:pointer;background:transparent;border:none;color:var(--dsw-alias-label-secondary,#888);font-size:14px;line-height:1;padding:2px 5px;border-radius:4px;}",
         '[data-snm-editing="1"] [data-snm-group]:hover [data-snm-group-dissolve]{opacity:1;}',
-        '[data-snm-group-dissolve]:hover{background:var(--dsw-alias-state-error-primary,#c33);color:#fff;}',
-        // 组内条目：L 型归属线（竖线贯穿 + 横拐到内容）+ 缩进，标明归属哪个抽屉
-        '[data-snm-row][data-snm-in-group]{',
+        "[data-snm-group-dissolve]:hover{background:var(--dsw-alias-state-error-primary,#c33);color:#fff;}",
+        // 组内条目：L 型归属线 + 缩进
+        "[data-snm-row][data-snm-in-group]{",
         "  padding-left:30px;",
         "  background-image:",
         "    linear-gradient(to bottom, var(--dsw-alias-border,rgba(128,128,128,.4)), var(--dsw-alias-border,rgba(128,128,128,.4))),",
@@ -151,897 +468,1053 @@ window.__ModuleLoader__.load({
         "  background-position:12px 0, 12px 50%;",
         "  background-repeat:no-repeat, no-repeat;",
         "}",
-        // 折叠收纳：组内成员隐藏（任何模式）
         '[data-snm-row][data-snm-collapsed="1"]{display:none;}',
-        // 拖入抽屉的落点高亮（dragover 时标 data-snm-drop）
         '[data-snm-group][data-snm-drop="1"]{',
         "  background:var(--dsw-alias-state-accent-bg,rgba(36,123,191,.16));",
         "  outline:1.5px solid var(--dsw-alias-accent,#247bbf);outline-offset:-1px;",
         "}",
-        // 新建抽屉按钮（编辑模式，nav 底部）
-        "[data-snm-add-group]{",
+        // 底部：新建抽屉 / 恢复默认
+        "[data-snm-add-group],[data-snm-reset]{",
         "  margin:4px 0;padding:6px 8px;cursor:pointer;text-align:center;font-size:12px;",
         "  border:1px dashed var(--dsw-alias-border,rgba(128,128,128,.35));border-radius:6px;",
         "  color:var(--dsw-alias-label-secondary,#888);",
         "}",
         "[data-snm-add-group]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.08));}",
+        "[data-snm-reset]{border-style:solid;border-color:transparent;margin-top:2px;}",
+        "[data-snm-reset]:hover{color:var(--dsw-alias-state-error-primary,#c33);background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.08));}",
+        // 键盘焦点可见
+        "[data-snm-group]:focus-visible,[data-snm-add-group]:focus-visible,[data-snm-reset]:focus-visible{",
+        "  outline:2px solid var(--dsw-alias-accent,#247bbf);outline-offset:1px;",
+        "}",
+        // 屏读文本
+        "[data-snm-sr]{position:absolute;width:1px;height:1px;margin:-1px;padding:0;",
+        "  overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;}",
       ].join("\n");
-      document.head.appendChild(tag);
     }
 
-    // ── sections 投影（entries -> [{id, order, label}]）──────────
-    function projectSections(ctx) {
-      var out = [];
-      try {
-        var entries = ctx.slots.entries("settings.section");
-        for (var i = 0; i < entries.length; i++) {
-          var o = entries[i] && entries[i].options ? entries[i].options : {};
-          var lbl = o.label;
-          if (typeof lbl === "function") {
-            try {
-              lbl = lbl();
-            } catch (e) {
-              lbl = "";
-            }
-          }
-          out.push({
-            id: o.id ? String(o.id) : "",
-            order: typeof o.order === "number" ? o.order : 0,
-            label: lbl ? String(lbl) : "",
-          });
-        }
-      } catch (e) {}
-      out.sort(function (a, b) {
-        return a.order - b.order;
-      });
-      return out;
-    }
+    // ══ 实例：所有可变状态都在这个闭包里，模块层面保持无状态 ══════
+    function createPlugin(ctx) {
+      var editing = false;
+      var state = { version: 1, order: [], groups: [], hidden: [] };
+      var sections = [];
+      var revision;
+      var groupSeq = 1;
+      var t = null;
+      var drag = null;
+      var justActedAt = 0;
+      var notice = "";
+      var noticeTimer = null;
+      var reported = dict();
+      var disposed = false;
+      var uiSubs = [];
+      var styleEl = null;
+      var bodyMo = null;
+      var navMo = null;
+      var navNode = null;
+      var lastFingerprint = "";
+      var rafId = 0;
+      var cleanups = [];
 
-    // ── DOM 认行：navCell -> section id ──────────────────────────
-    function navCells(nav) {
-      if (!nav) return [];
-      var list = nav.querySelectorAll(":scope > " + SEL.navCell);
-      return Array.prototype.slice.call(list);
-    }
-
-    function markRows(ctx) {
-      var nav = findNav();
-      if (!nav) return;
-      nav.setAttribute("data-snm-nav", "1");
-      nav.setAttribute("data-snm-editing", editing ? "1" : "0");
-      sections = projectSections(ctx);
-      var cells = navCells(nav);
-      // 主映射：DOM 序号 ↔ sections（同源 rows.map，React 按 options.order 渲染）。
-      // 校验：label 文本一致则确信；不一致则按 label 兜底查找。
-      var byLabel = {};
-      for (var s = 0; s < sections.length; s++) {
-        var key = (sections[s].label || "").trim();
-        if (key && !byLabel[key]) byLabel[key] = sections[s].id;
-      }
-      for (var i = 0; i < cells.length; i++) {
-        var cell = cells[i];
-        var id = null;
-        var idxEntry = sections[i];
-        if (idxEntry) {
-          var lblEl = cell.querySelector(SEL.navLabel);
-          var txt = lblEl ? (lblEl.textContent || "").trim() : "";
-          if (!txt || txt === (idxEntry.label || "").trim()) {
-            id = idxEntry.id;
+      // ── 通知（齿轮组件订阅）──────────────────────────────────
+      function publish() {
+        for (var i = 0; i < uiSubs.length; i++) {
+          try {
+            uiSubs[i](function (n) {
+              return n + 1;
+            });
+          } catch (e) {
+            dbg("ui notify", e);
           }
         }
-        if (!id) {
-          var lblEl2 = cell.querySelector(SEL.navLabel);
-          var txt2 = lblEl2 ? (lblEl2.textContent || "").trim() : "";
-          id = byLabel[txt2] || (idxEntry ? idxEntry.id : "") || "";
-        }
-        if (id) {
-          cell.setAttribute("data-snm-row", "1");
-          cell.setAttribute("data-snm-id", id);
-        }
       }
-    }
-
-    function findNav() {
-      if (!document) return null;
-      var panel = document.querySelector(SEL.panel);
-      if (!panel) return null;
-      return panel.querySelector(SEL.navList);
-    }
-
-    // ── 应用 order / groups / hidden / editing 到 DOM ───────────
-    function applyDom() {
-      var nav = findNav();
-      if (!nav) return;
-      nav.setAttribute("data-snm-editing", editing ? "1" : "0");
-      var hiddenSet = {};
-      for (var k = 0; k < state.hidden.length; k++) hiddenSet[state.hidden[k]] = 1;
-      var groupById = {};
-      for (var gi = 0; gi < state.groups.length; gi++) groupById[state.groups[gi].id] = state.groups[gi];
-      var cellById = {};
-      var cells = navCells(nav);
-      for (var ci = 0; ci < cells.length; ci++) {
-        var cid = cells[ci].getAttribute("data-snm-id");
-        if (cid) cellById[cid] = cells[ci];
+      function setNotice(msg) {
+        notice = msg || "";
+        if (noticeTimer) {
+          clearTimeout(noticeTimer);
+          noticeTimer = null;
+        }
+        if (notice) {
+          noticeTimer = setTimeout(function () {
+            noticeTimer = null;
+            notice = "";
+            publish();
+          }, NOTICE_MS);
+        }
+        publish();
       }
-      syncGroupHeaders(nav);
-      var counter = 0;
-      for (var ti = 0; ti < state.order.length; ti++) {
-        var top = state.order[ti];
-        var g = groupById[top];
-        if (g) {
-          var header = nav.querySelector('[data-snm-group-id="' + top + '"]');
-          if (header) header.style.order = String(counter++);
-          for (var mi = 0; mi < g.items.length; mi++) {
-            var mid = g.items[mi];
-            var mcell = cellById[mid];
-            if (mcell) {
+      // 同一类故障只报一次，避免刷屏
+      function report(kind, err) {
+        if (reported[kind]) return;
+        reported[kind] = 1;
+        dbg(kind, err);
+        setNotice(t ? t("saveFailed") : DICT.zh.saveFailed);
+      }
+      function clearReport(kind) {
+        if (reported[kind]) delete reported[kind];
+      }
+
+      // ── 样式注入 / 清理 ─────────────────────────────────────
+      function ensureStyles() {
+        if (!document || !document.head) return;
+        if (styleEl && styleEl.parentNode) return;
+        var existing = document.querySelector('style[data-plugin-css="' + STYLE_TAG + '"]');
+        if (existing) {
+          styleEl = existing;
+          return;
+        }
+        var tag = document.createElement("style");
+        tag.setAttribute("data-plugin", NS);
+        tag.setAttribute("data-plugin-css", STYLE_TAG);
+        tag.textContent = buildCss();
+        document.head.appendChild(tag);
+        styleEl = tag;
+      }
+      function removeStyles() {
+        if (styleEl && styleEl.parentNode) {
+          try {
+            styleEl.parentNode.removeChild(styleEl);
+          } catch (e) {
+            dbg("remove style", e);
+          }
+        }
+        styleEl = null;
+      }
+
+      // ── 定位 ────────────────────────────────────────────────
+      function findNav() {
+        if (!document) return null;
+        var panel = document.querySelector(SEL.panel);
+        if (!panel) return null;
+        return panel.querySelector(SEL.navList);
+      }
+      function navCells(nav) {
+        if (!nav) return [];
+        var list = nav.querySelectorAll(":scope > " + SEL.navCell);
+        return Array.prototype.slice.call(list);
+      }
+      function rowLabel(cell) {
+        var el = cell.querySelector(SEL.navLabel);
+        return el ? (el.textContent || "").trim() : "";
+      }
+      // 按数据属性线性查找（不再拼接选择器，id 里有引号也不会炸 querySelector）
+      function findByAttr(root, attr, value) {
+        if (!root || value === null || value === undefined) return null;
+        var all = root.querySelectorAll("[" + attr + "]");
+        for (var i = 0; i < all.length; i++) {
+          if (all[i].getAttribute(attr) === String(value)) return all[i];
+        }
+        return null;
+      }
+
+      // ── 认行：序号为主、label 为兜底，双向校验 ─────────────────
+      function markRows(nav) {
+        var cells = navCells(nav);
+        var byLabel = dict();
+        for (var s = 0; s < sections.length; s++) {
+          var key = sections[s].label;
+          if (key && !own(byLabel, key)) byLabel[key] = sections[s].id;
+        }
+        var sameLen = cells.length === sections.length;
+        var used = dict();
+        var complete = cells.length > 0;
+        for (var i = 0; i < cells.length; i++) {
+          var cell = cells[i];
+          var label = rowLabel(cell);
+          var id = null;
+          if (sameLen && sections[i] && sections[i].id) {
+            // 文本一致（或还没渲染出文本）→ 按序号确认
+            if (!label || label === sections[i].label) id = sections[i].id;
+          }
+          if (!id && label && own(byLabel, label)) id = byLabel[label];
+          if (id && own(used, id)) id = null; // 重复 id 不认
+          if (!id && sameLen && sections[i] && sections[i].id && !own(used, sections[i].id)) {
+            id = sections[i].id; // 序号兜底
+          }
+          if (id) {
+            used[id] = 1;
+            cell.setAttribute(DATA.row, "1");
+            cell.setAttribute(DATA.id, id);
+          } else {
+            cell.removeAttribute(DATA.row);
+            cell.removeAttribute(DATA.id);
+            complete = false;
+          }
+        }
+        return complete;
+      }
+
+      // ── 应用 order / groups / hidden / editing ─────────────────
+      function applyDom(nav) {
+        nav.setAttribute(DATA.nav, "1");
+        nav.setAttribute(DATA.editing, editing ? "1" : "0");
+        var hiddenSet = dict();
+        for (var k = 0; k < state.hidden.length; k++) hiddenSet[state.hidden[k]] = 1;
+        var cellById = dict();
+        var cells = navCells(nav);
+        for (var ci = 0; ci < cells.length; ci++) {
+          var cid = cells[ci].getAttribute(DATA.id);
+          if (cid) cellById[cid] = cells[ci];
+        }
+        syncGroupHeaders(nav);
+        var counter = 0;
+        for (var ti = 0; ti < state.order.length; ti++) {
+          var top = state.order[ti];
+          var g = findGroup(state, top);
+          if (g) {
+            var header = findByAttr(nav, DATA.groupId, top);
+            if (header) header.style.order = String(counter++);
+            for (var mi = 0; mi < g.items.length; mi++) {
+              var mid = g.items[mi];
+              var mcell = cellById[mid];
+              if (!mcell) continue;
               mcell.style.order = String(counter++);
-              mcell.setAttribute("data-snm-in-group", g.id);
-              if (g.collapsed) mcell.setAttribute("data-snm-collapsed", "1");
-              else mcell.removeAttribute("data-snm-collapsed");
-              if (hiddenSet[mid]) mcell.setAttribute("data-snm-hidden", "1");
-              else mcell.removeAttribute("data-snm-hidden");
+              mcell.setAttribute(DATA.inGroup, g.id);
+              if (g.collapsed) mcell.setAttribute(DATA.collapsed, "1");
+              else mcell.removeAttribute(DATA.collapsed);
+              if (own(hiddenSet, mid)) mcell.setAttribute(DATA.hidden, "1");
+              else mcell.removeAttribute(DATA.hidden);
             }
-          }
-        } else {
-          var cell = cellById[top];
-          if (cell) {
+          } else {
+            var cell = cellById[top];
+            if (!cell) continue;
             cell.style.order = String(counter++);
-            cell.removeAttribute("data-snm-in-group");
-            cell.removeAttribute("data-snm-collapsed");
-            if (hiddenSet[top]) cell.setAttribute("data-snm-hidden", "1");
-            else cell.removeAttribute("data-snm-hidden");
+            cell.removeAttribute(DATA.inGroup);
+            cell.removeAttribute(DATA.collapsed);
+            if (own(hiddenSet, top)) cell.setAttribute(DATA.hidden, "1");
+            else cell.removeAttribute(DATA.hidden);
           }
         }
+        for (var bi = 0; bi < cells.length; bi++) {
+          if (!cells[bi].style.order) cells[bi].style.order = String(1000 + bi);
+        }
+        buildTail(nav, counter);
       }
-      for (var bi = 0; bi < cells.length; bi++) {
-        if (!cells[bi].style.order) cells[bi].style.order = String(1000 + bi);
+
+      function applyEditingOnly(nav) {
+        nav.setAttribute(DATA.nav, "1");
+        nav.setAttribute(DATA.editing, editing ? "1" : "0");
       }
-      buildAddButton(nav, counter);
-    }
 
-    // ── 持久化（remote.settings describe/update，无需 scope）──────
-    // 读：describe().namespaces.find(ns) → .value / .revision。
-    // 写：update(ns, patch, expectedRevision)。expectedRevision 省略=无条件写
-    //（本插件独占 settings-nav-manager 命名空间，无并发写，省略 revision 更稳）。
-    function findNs(res) {
-      var arr = res && res.namespaces;
-      if (!Array.isArray(arr)) return null;
-      for (var i = 0; i < arr.length; i++) {
-        if (arr[i] && arr[i].ns === NS) return arr[i];
+      // ── 一次同步：投影 → 认行 → 归一化 → 应用 ──────────────────
+      function sync() {
+        if (disposed) return;
+        ensureStyles();
+        sections = projectSections(ctx); // 永远先算，不看 DOM（P0）
+        var nav = findNav();
+        var ok = false;
+        if (nav) ok = markRows(nav);
+        state = normalizeState(state, knownIdsFrom(sections), sectionIds(sections));
+        if (!nav) return;
+        if (ok) applyDom(nav);
+        else {
+          applyEditingOnly(nav);
+          if (sections.length) report("recognize", "row mapping incomplete");
+        }
       }
-      return null;
-    }
 
-    function remote() {
-      return ctxRef && ctxRef.remote ? ctxRef.remote.settings : null;
-    }
-
-    function knownIds() {
-      var set = {};
-      for (var i = 0; i < sections.length; i++) if (sections[i].id) set[sections[i].id] = 1;
-      return set;
-    }
-
-    // 写前过滤非法元素（只保留已知 section id；groups.items 同）
-    function persist() {
-      var rm = remote();
-      if (!rm || typeof rm.update !== "function") return Promise.resolve(false);
-      var known = knownIds();
-      var order = state.order.filter(function (id) {
-        return known[id] || isGroupTop(id);
-      });
-      var groups = state.groups.map(function (g) {
-        return {
-          id: g.id,
-          name: g.name,
-          collapsed: !!g.collapsed,
-          items: g.items.filter(function (id) {
-            return known[id];
-          }),
-        };
-      });
-      var hidden = state.hidden.filter(function (id) {
-        return known[id];
-      });
-      try {
-        return Promise.resolve(
-          rm.update(NS, { order: order, groups: groups, hidden: hidden }),
-        ).then(
-          function () {
+      // ── 持久化 ──────────────────────────────────────────────
+      function remote() {
+        return ctx && ctx.remote ? ctx.remote.settings : null;
+      }
+      function writeOnce(payload) {
+        var rm = remote();
+        var args = [NS, payload];
+        if (typeof revision === "number") args.push(revision);
+        return Promise.resolve(rm.update.apply(rm, args));
+      }
+      function persist() {
+        var rm = remote();
+        if (!rm || typeof rm.update !== "function") return Promise.resolve(false);
+        var payload = serializeState(state, knownIdsFrom(sections));
+        if (!payload) return Promise.resolve(false); // 分区未知 → 不写（防覆盖）
+        var wrote;
+        try {
+          wrote = writeOnce(payload);
+        } catch (e) {
+          wrote = Promise.reject(e);
+        }
+        return wrote.then(
+          function (res) {
+            clearReport("save");
+            revision = res && typeof res.revision === "number" ? res.revision : undefined;
             return true;
           },
-          function () {
+          function (err) {
+            // 冲突：重读一次后重放（本窗口的意图视为最新）
+            if (err && err.code === "SETTINGS_CONFLICT") {
+              return reloadRevision().then(function () {
+                return writeOnce(payload).then(
+                  function (res2) {
+                    clearReport("save");
+                    revision = res2 && typeof res2.revision === "number" ? res2.revision : undefined;
+                    return true;
+                  },
+                  function (err2) {
+                    report("save", err2);
+                    return false;
+                  },
+                );
+              });
+            }
+            report("save", err);
             return false;
           },
         );
-      } catch (e) {
-        return Promise.resolve(false);
       }
-    }
+      function reloadRevision() {
+        var rm = remote();
+        if (!rm || typeof rm.describe !== "function") return Promise.resolve(undefined);
+        return Promise.resolve()
+          .then(function () {
+            return rm.describe();
+          })
+          .then(function (res) {
+            var ns = findNs(res);
+            revision = ns && typeof ns.revision === "number" ? ns.revision : undefined;
+            return revision;
+          })
+          .catch(function (e) {
+            dbg("describe(retry)", e);
+            revision = undefined;
+            return undefined;
+          });
+      }
+      function findNs(res) {
+        var arr = res && res.namespaces;
+        if (!Array.isArray(arr)) return null;
+        for (var i = 0; i < arr.length; i++) {
+          if (arr[i] && arr[i].ns === NS) return arr[i];
+        }
+        return null;
+      }
+      function loadState() {
+        var rm = remote();
+        if (!rm || typeof rm.describe !== "function") return Promise.resolve();
+        return Promise.resolve()
+          .then(function () {
+            return rm.describe();
+          })
+          .then(function (res) {
+            var ns = findNs(res);
+            state = createState(ns && ns.value);
+            revision = ns && typeof ns.revision === "number" ? ns.revision : undefined;
+            updateGroupSeq();
+            sync();
+          })
+          .catch(function (err) {
+            dbg("describe", err);
+            state = createState(null);
+            revision = undefined;
+            sync();
+          });
+      }
+      function updateGroupSeq() {
+        for (var i = 0; i < state.groups.length; i++) {
+          var m = /^g-(\d+)$/.exec(state.groups[i].id);
+          if (m) {
+            var n = parseInt(m[1], 10);
+            if (n >= groupSeq) groupSeq = n + 1;
+          }
+        }
+      }
 
-    // 异步读取 + 回退默认（任何异常 → 空 = 原生默认顺序）。
-    // 读到后 refresh 一次，让认行/排序/显隐落到位。
-    function loadStateAsync() {
-      var def = { order: [], groups: [], hidden: [] };
-      var rm = remote();
-      if (!rm || typeof rm.describe !== "function") {
-        state = def;
-        return Promise.resolve();
-      }
-      return Promise.resolve()
-        .then(function () {
-          return rm.describe();
-        })
-        .then(function (res) {
-          var ns = findNs(res);
-          var v = ns && ns.value;
-          state = {
-            order: v && Array.isArray(v.order) ? v.order.filter(isStr) : [],
-            groups:
-              v && Array.isArray(v.groups)
-                ? v.groups
-                    .filter(function (g) {
-                      return g && isStr(g.id);
-                    })
-                    .map(function (g) {
-                      return {
-                        id: String(g.id),
-                        name: isStr(g.name) ? String(g.name) : "抽屉",
-                        collapsed: !!g.collapsed,
-                        items: Array.isArray(g.items) ? g.items.filter(isStr) : [],
-                      };
-                    })
-                : [],
-            hidden: v && Array.isArray(v.hidden) ? v.hidden.filter(isStr) : [],
-          };
-          updateGroupSeq();
-          if (ctxRef) refresh(ctxRef);
-        })
-        .catch(function () {
-          state = def;
-          if (ctxRef) refresh(ctxRef);
+      // ── 抽屉头（插件自有节点）──────────────────────────────────
+      function syncGroupHeaders(nav) {
+        var existing = dict();
+        var olds = nav.querySelectorAll("[" + DATA.group + "]");
+        for (var i = 0; i < olds.length; i++) {
+          existing[olds[i].getAttribute(DATA.groupId)] = olds[i];
+        }
+        var seen = dict();
+        for (var gi = 0; gi < state.groups.length; gi++) {
+          var g = state.groups[gi];
+          seen[g.id] = 1;
+          var header = own(existing, g.id) ? existing[g.id] : createGroupHeader(nav, g);
+          updateGroupHeader(header, g);
+        }
+        Object.keys(existing).forEach(function (id) {
+          if (!own(seen, id)) {
+            try {
+              existing[id].remove();
+            } catch (e) {
+              dbg("remove header", e);
+            }
+          }
         });
-    }
+      }
 
-    function isStr(x) {
-      return typeof x === "string";
-    }
+      function createGroupHeader(nav, g) {
+        var header = document.createElement("div");
+        header.setAttribute(DATA.group, "1");
+        header.setAttribute(DATA.groupId, g.id);
+        header.setAttribute("role", "button");
+        header.setAttribute("tabindex", "0");
+        header.setAttribute("aria-expanded", g.collapsed ? "false" : "true");
+        var toggle = document.createElement("span");
+        toggle.setAttribute(DATA.groupToggle, "1");
+        toggle.textContent = g.collapsed ? "▸" : "▾";
+        var nameEl = document.createElement("span");
+        nameEl.setAttribute(DATA.groupName, "1");
+        nameEl.textContent = g.name;
+        var dis = document.createElement("button");
+        dis.setAttribute(DATA.groupDissolve, "1");
+        dis.setAttribute("type", "button");
+        dis.setAttribute("title", t ? t("dissolve") : DICT.zh.dissolve);
+        dis.setAttribute("aria-label", t ? t("dissolve") : DICT.zh.dissolve);
+        dis.textContent = "×";
+        header.appendChild(toggle);
+        header.appendChild(nameEl);
+        header.appendChild(dis);
 
-    // 归一化：补全缺失 id（新分区）到末尾；保证 id 唯一（顶层 或 某组，不重复）
-    function normalize() {
-      var known = knownIds();
-      var placed = {};
-      var gi, ii, id, oi, top;
-      for (gi = 0; gi < state.groups.length; gi++) {
-        var g = state.groups[gi];
-        var ng = [];
-        for (ii = 0; ii < g.items.length; ii++) {
-          id = g.items[ii];
-          if (known[id] && !placed[id]) {
-            placed[id] = 1;
-            ng.push(id);
+        // 整头可点：单击延迟 220ms，期间第二次点击（=双击改名）取消折叠
+        var clickTimer = null;
+        header.addEventListener("click", function (e) {
+          if (e.target && e.target.getAttribute && e.target.getAttribute(DATA.groupInput)) return;
+          e.stopPropagation();
+          e.preventDefault();
+          if (clickTimer) {
+            clearTimeout(clickTimer);
+            clickTimer = null;
+            return;
           }
-        }
-        g.items = ng;
-      }
-      var newOrder = [];
-      var seenTop = {};
-      for (oi = 0; oi < state.order.length; oi++) {
-        top = state.order[oi];
-        if (isGroupTop(top)) {
-          if (!seenTop[top]) {
-            seenTop[top] = 1;
-            newOrder.push(top);
+          clickTimer = setTimeout(function () {
+            clickTimer = null;
+            toggleCollapsed(g.id);
+          }, 220);
+        });
+        header.addEventListener("dblclick", function (e) {
+          e.stopPropagation();
+          e.preventDefault();
+          if (clickTimer) {
+            clearTimeout(clickTimer);
+            clickTimer = null;
           }
-        } else if (known[top] && !placed[top]) {
-          placed[top] = 1;
-          seenTop[top] = 1;
-          newOrder.push(top);
-        }
+          startRename(header, g.id, header.querySelector("[" + DATA.groupName + "]"));
+        });
+        dis.addEventListener("click", function (e) {
+          e.stopPropagation();
+          e.preventDefault();
+          if (clickTimer) {
+            clearTimeout(clickTimer);
+            clickTimer = null;
+          }
+          if (editing) dissolveGroup(g.id);
+        });
+        nav.appendChild(header);
+        return header;
       }
-      for (var si = 0; si < sections.length; si++) {
-        id = sections[si].id;
-        if (id && known[id] && !placed[id]) {
-          placed[id] = 1;
-          newOrder.push(id);
-        }
-      }
-      for (var gj = 0; gj < state.groups.length; gj++) {
-        if (!seenTop[state.groups[gj].id]) {
-          seenTop[state.groups[gj].id] = 1;
-          newOrder.push(state.groups[gj].id);
-        }
-      }
-      state.order = newOrder;
-      state.hidden = state.hidden.filter(function (id2) {
-        return known[id2];
-      });
-    }
 
-    // ── 抽屉（命名分组）辅助 ───────────────────────────────────
-    function isGroupTop(id) {
-      for (var i = 0; i < state.groups.length; i++) if (state.groups[i].id === id) return true;
-      return false;
-    }
-    function findGroup(id) {
-      for (var i = 0; i < state.groups.length; i++) if (state.groups[i].id === id) return state.groups[i];
-      return null;
-    }
-    function removeItemEverywhere(id) {
-      var oi = state.order.indexOf(id);
-      if (oi >= 0) state.order.splice(oi, 1);
-      for (var i = 0; i < state.groups.length; i++) {
-        var gi = state.groups[i].items.indexOf(id);
-        if (gi >= 0) state.groups[i].items.splice(gi, 1);
+      function updateGroupHeader(header, g) {
+        if (header.getAttribute(DATA.renaming) === "1") return;
+        var toggle = header.querySelector("[" + DATA.groupToggle + "]");
+        if (toggle) toggle.textContent = g.collapsed ? "▸" : "▾";
+        header.setAttribute("aria-expanded", g.collapsed ? "false" : "true");
+        var nameEl = header.querySelector("[" + DATA.groupName + "]");
+        if (nameEl && nameEl.textContent !== g.name) nameEl.textContent = g.name;
       }
-    }
-    function updateGroupSeq() {
-      for (var i = 0; i < state.groups.length; i++) {
-        var m = /^g-(\d+)$/.exec(state.groups[i].id);
-        if (m) {
-          var n = parseInt(m[1], 10);
-          if (n >= groupSeq) groupSeq = n + 1;
+
+      function startRename(header, gid, nameEl) {
+        if (!editing || !header || !nameEl) return;
+        var g = findGroup(state, gid);
+        if (!g) return;
+        if (header.getAttribute(DATA.renaming) === "1") return;
+        header.setAttribute(DATA.renaming, "1");
+        var input = document.createElement("input");
+        input.type = "text";
+        input.value = g.name;
+        input.maxLength = RENAME_MAX;
+        input.setAttribute(DATA.groupInput, "1");
+        input.setAttribute("aria-label", t ? t("newGroup") : DICT.zh.newGroup);
+        nameEl.style.display = "none";
+        header.appendChild(input);
+        try {
+          input.focus();
+          input.select();
+        } catch (e) {
+          dbg("focus rename", e);
         }
-      }
-    }
-
-    // ── 抽屉操作 ───────────────────────────────────────────────
-    function addGroup() {
-      var g = { id: "g-" + groupSeq++, name: t ? t("newGroup") : "新抽屉", collapsed: false, items: [] };
-      state.groups.push(g);
-      state.order.push(g.id);
-      applyDom();
-      persist();
-      // 建完即改名（方案 P2 交互）
-      var nav = findNav();
-      if (nav) {
-        var h = nav.querySelector('[data-snm-group-id="' + g.id + '"]');
-        if (h) startRename(h, g.id, h.querySelector("[data-snm-group-name]"));
-      }
-      return g;
-    }
-    function dissolveGroup(gid) {
-      var g = findGroup(gid);
-      if (!g) return;
-      var pos = state.order.indexOf(gid);
-      var members = g.items.slice();
-      if (pos >= 0) {
-        state.order.splice(pos, 1);
-        for (var i = 0; i < members.length; i++) state.order.splice(pos + i, 0, members[i]);
-      } else {
-        for (var j = 0; j < members.length; j++) state.order.push(members[j]);
-      }
-      var gi = state.groups.indexOf(g);
-      if (gi >= 0) state.groups.splice(gi, 1);
-      applyDom();
-      persist();
-    }
-    function toggleCollapsed(gid) {
-      var g = findGroup(gid);
-      if (!g) return;
-      g.collapsed = !g.collapsed;
-      applyDom();
-      persist();
-    }
-    function renameGroup(gid, name) {
-      var g = findGroup(gid);
-      if (!g) return;
-      name = String(name == null ? "" : name).trim().slice(0, 32) || (t ? t("newGroup") : "抽屉");
-      g.name = name;
-      applyDom();
-      persist();
-    }
-
-    // ── 抽屉头 DOM（插件自有节点，可自由增删，非 React 拥有）────
-    function syncGroupHeaders(nav) {
-      var existing = {};
-      var olds = nav.querySelectorAll("[data-snm-group]");
-      for (var i = 0; i < olds.length; i++) existing[olds[i].getAttribute("data-snm-group-id")] = olds[i];
-      var seen = {};
-      for (var gi = 0; gi < state.groups.length; gi++) {
-        var g = state.groups[gi];
-        seen[g.id] = 1;
-        var h = existing[g.id];
-        if (!h) h = createGroupHeader(nav, g);
-        updateGroupHeader(h, g);
-      }
-      Object.keys(existing).forEach(function (id) {
-        if (!seen[id]) {
+        var done = false;
+        function finish(commit) {
+          if (done) return;
+          done = true;
+          header.removeAttribute(DATA.renaming);
+          var val = input.value;
           try {
-            existing[id].remove();
-          } catch (e) {}
+            input.remove();
+          } catch (e) {
+            dbg("remove input", e);
+          }
+          nameEl.style.display = "";
+          if (commit) renameGroup(gid, val);
         }
-      });
-    }
-    function createGroupHeader(nav, g) {
-      var h = document.createElement("div");
-      h.setAttribute("data-snm-group", "1");
-      h.setAttribute("data-snm-group-id", g.id);
-      var toggle = document.createElement("span");
-      toggle.setAttribute("data-snm-group-toggle", "1");
-      toggle.textContent = g.collapsed ? "▸" : "▾";
-      var nameEl = document.createElement("span");
-      nameEl.setAttribute("data-snm-group-name", "1");
-      nameEl.textContent = g.name;
-      var dis = document.createElement("button");
-      dis.setAttribute("data-snm-group-dissolve", "1");
-      dis.setAttribute("title", t ? t("dissolve") : "解散抽屉");
-      dis.textContent = "×";
-      h.appendChild(toggle);
-      h.appendChild(nameEl);
-      h.appendChild(dis);
-      // 整个抽屉头都可点击折叠/展开（不再只有 ▾▸ 小触点）。
-      // 单击延迟 220ms 判定：期间第二次点击（=双击改名）则取消折叠。
-      var clickTimer = null;
-      h.addEventListener("click", function (e) {
-        if (e.target && e.target.getAttribute && e.target.getAttribute("data-snm-group-input")) return;
-        e.stopPropagation();
-        e.preventDefault();
-        if (clickTimer) {
-          clearTimeout(clickTimer);
-          clickTimer = null;
-          return;
-        }
-        clickTimer = setTimeout(function () {
-          clickTimer = null;
-          toggleCollapsed(g.id);
-        }, 220);
-      });
-      h.addEventListener("dblclick", function (e) {
-        e.stopPropagation();
-        e.preventDefault();
-        if (clickTimer) {
-          clearTimeout(clickTimer);
-          clickTimer = null;
-        }
-        startRename(h, g.id, nameEl);
-      });
-      dis.addEventListener("click", function (e) {
-        e.stopPropagation();
-        e.preventDefault();
-        if (clickTimer) {
-          clearTimeout(clickTimer);
-          clickTimer = null;
-        }
-        if (editing) dissolveGroup(g.id);
-      });
-      nav.appendChild(h);
-      return h;
-    }
-    function updateGroupHeader(h, g) {
-      if (h.getAttribute("data-snm-renaming") === "1") return;
-      var toggle = h.querySelector("[data-snm-group-toggle]");
-      if (toggle) toggle.textContent = g.collapsed ? "▸" : "▾";
-      var nameEl = h.querySelector("[data-snm-group-name]");
-      if (nameEl && nameEl.textContent !== g.name) nameEl.textContent = g.name;
-    }
-    function startRename(header, gid, nameEl) {
-      if (!editing) return;
-      var g = findGroup(gid);
-      if (!g) return;
-      header.setAttribute("data-snm-renaming", "1");
-      var input = document.createElement("input");
-      input.type = "text";
-      input.value = g.name;
-      input.setAttribute("data-snm-group-input", "1");
-      input.maxLength = 32;
-      nameEl.style.display = "none";
-      header.appendChild(input);
-      input.focus();
-      input.select();
-      var done = false;
-      function commit() {
-        if (done) return;
-        done = true;
-        header.removeAttribute("data-snm-renaming");
-        var val = input.value;
-        try {
-          input.remove();
-        } catch (e) {}
-        nameEl.style.display = "";
-        renameGroup(gid, val);
-      }
-      function cancel() {
-        if (done) return;
-        done = true;
-        header.removeAttribute("data-snm-renaming");
-        try {
-          input.remove();
-        } catch (e2) {}
-        nameEl.style.display = "";
-      }
-      input.addEventListener("click", function (e) {
-        e.stopPropagation();
-      });
-      input.addEventListener("blur", commit);
-      input.addEventListener("keydown", function (e) {
-        e.stopPropagation();
-        if (e.key === "Enter") {
-          e.preventDefault();
-          commit();
-        } else if (e.key === "Escape") {
-          e.preventDefault();
-          cancel();
-        }
-      });
-    }
-    function buildAddButton(nav, order) {
-      var btn = nav.querySelector("[data-snm-add-group]");
-      if (!editing) {
-        if (btn) btn.remove();
-        return;
-      }
-      if (!btn) {
-        btn = document.createElement("div");
-        btn.setAttribute("data-snm-add-group", "1");
-        btn.textContent = t ? t("addGroup") : "＋ 新建抽屉";
-        btn.addEventListener("click", function (e) {
+        input.addEventListener("click", function (e) {
           e.stopPropagation();
-          e.preventDefault();
-          if (editing) addGroup();
         });
-        nav.appendChild(btn);
-      }
-      btn.style.order = String(order);
-    }
-
-    // ── 编辑模式切换 ───────────────────────────────────────────
-    function setEditing(v) {
-      v = !!v;
-      if (editing === v) return;
-      editing = v;
-      applyDom();
-      notifyEditing();
-    }
-
-    // ── 刷新（认行 + 应用态）────────────────────────────────────
-    function refresh(ctx) {
-      injectStyles();
-      markRows(ctx);
-      normalize();
-      applyDom();
-    }
-
-    // ── 拖拽 + 眼睛：事件委托（坐标命中，不注入节点）────────────
-    var drag = null;
-
-    function clearDropMarks(nav) {
-      if (!nav) return;
-      var marked = nav.querySelectorAll('[data-snm-drop="1"]');
-      for (var i = 0; i < marked.length; i++) marked[i].removeAttribute("data-snm-drop");
-    }
-    function collectSlots(nav, excludeId) {
-      var els = [];
-      var cells = navCells(nav);
-      for (var i = 0; i < cells.length; i++) {
-        var id = cells[i].getAttribute("data-snm-id");
-        if (id && id !== excludeId) els.push({ el: cells[i], kind: "row", id: id });
-      }
-      var heads = nav.querySelectorAll("[data-snm-group]");
-      for (var j = 0; j < heads.length; j++) {
-        var gid = heads[j].getAttribute("data-snm-group-id");
-        if (gid && gid !== excludeId) els.push({ el: heads[j], kind: "group", id: gid });
-      }
-      for (var k = 0; k < els.length; k++) {
-        var r = els[k].el.getBoundingClientRect();
-        els[k].top = r.top;
-        els[k].bottom = r.bottom;
-        els[k].mid = r.top + r.height / 2;
-      }
-      els.sort(function (a, b) {
-        return a.top - b.top;
-      });
-      return els;
-    }
-
-    // 统一 drop 目标：hover 抽屉头→入组；否则按视觉槽位插入（组内 / 顶层）
-    function computeDrop(nav, clientY, drag) {
-      if (!drag.isGroup) {
-        var heads = nav.querySelectorAll("[data-snm-group]");
-        for (var i = 0; i < heads.length; i++) {
-          var hr = heads[i].getBoundingClientRect();
-          if (clientY >= hr.top && clientY <= hr.bottom) {
-            return { type: "into-group", groupId: heads[i].getAttribute("data-snm-group-id") };
+        input.addEventListener("blur", function () {
+          finish(true);
+        });
+        input.addEventListener("keydown", function (e) {
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            e.preventDefault();
+            finish(true);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            finish(false);
           }
-        }
+        });
       }
-      var els = collectSlots(nav, drag.id);
-      var ref = null;
-      for (var s = 0; s < els.length; s++) {
-        if (clientY < els[s].mid) {
-          ref = els[s];
-          break;
-        }
-      }
-      if (!ref) return { type: "insert-end" };
-      if (ref.kind === "group") return { type: "insert-before", refType: "group", refId: ref.id };
-      var gid = ref.el.getAttribute("data-snm-in-group");
-      return { type: "insert-before", refType: "row", refId: ref.id, refGroup: gid || null };
-    }
 
-    function applyDrop(drag, drop) {
-      if (drag.isGroup) {
-        // 被拖的是抽屉：只在顶层排序（成员跟随），不入组
-        var gid = drag.id;
-        var cur = state.order.indexOf(gid);
-        if (drop.type === "insert-end") {
-          if (cur >= 0) state.order.splice(cur, 1);
-          state.order.push(gid);
-        } else if (drop.type === "insert-before") {
-          var refTop = drop.refId;
-          if (drop.refType === "row" && drop.refGroup) refTop = drop.refGroup;
-          var pos = state.order.indexOf(refTop);
-          if (cur >= 0) state.order.splice(cur, 1);
-          if (pos < 0) pos = state.order.length;
-          else if (cur >= 0 && cur < pos) pos--;
-          state.order.splice(pos, 0, gid);
-        }
-        return;
-      }
-      // 被拖的是条目：从原位置移除，再插入目标
-      removeItemEverywhere(drag.id);
-      if (drop.type === "into-group") {
-        var g = findGroup(drop.groupId);
-        if (g) g.items.push(drag.id);
-      } else if (drop.type === "insert-end") {
-        state.order.push(drag.id);
-      } else if (drop.type === "insert-before") {
-        if (drop.refType === "group") {
-          var p = state.order.indexOf(drop.refId);
-          if (p < 0) p = state.order.length;
-          state.order.splice(p, 0, drag.id);
-        } else if (drop.refGroup) {
-          var g2 = findGroup(drop.refGroup);
-          if (g2) {
-            var ip = g2.items.indexOf(drop.refId);
-            if (ip < 0) ip = g2.items.length;
-            g2.items.splice(ip, 0, drag.id);
-          }
-        } else {
-          var p2 = state.order.indexOf(drop.refId);
-          if (p2 < 0) p2 = state.order.length;
-          state.order.splice(p2, 0, drag.id);
-        }
-      }
-    }
-
-    function onPointerDown(ctx, e) {
-      if (!editing) return;
-      var nav = findNav();
-      if (!nav) return;
-      var row = closestRow(e.target);
-      var header = closestGroupHeader(e.target);
-      if (row) {
-        var rect = row.getBoundingClientRect();
-        var offRight = rect.right - e.clientX;
-        if (offRight <= ZONE_EYE) {
-          drag = null;
+      function buildTail(nav, order) {
+        var addBtn = nav.querySelector("[" + DATA.addGroup + "]");
+        var resetBtn = nav.querySelector("[" + DATA.reset + "]");
+        if (!editing) {
+          if (addBtn) addBtn.remove();
+          if (resetBtn) resetBtn.remove();
           return;
         }
-        drag = {
-          id: row.getAttribute("data-snm-id"),
-          isGroup: false,
-          startX: e.clientX,
-          startY: e.clientY,
-          zone: "body",
-          active: false,
-          nav: nav,
-          row: row,
-        };
-      } else if (header) {
-        drag = {
-          id: header.getAttribute("data-snm-group-id"),
-          isGroup: true,
-          startX: e.clientX,
-          startY: e.clientY,
-          zone: "group",
-          active: false,
-          nav: nav,
-          row: header,
-        };
+        if (!addBtn) {
+          addBtn = document.createElement("div");
+          addBtn.setAttribute(DATA.addGroup, "1");
+          addBtn.setAttribute("role", "button");
+          addBtn.setAttribute("tabindex", "0");
+          addBtn.textContent = t ? t("addGroup") : DICT.zh.addGroup;
+          bindActivate(addBtn, function () {
+            if (editing) addGroup();
+          });
+          nav.appendChild(addBtn);
+        }
+        addBtn.style.order = String(order);
+        if (!resetBtn) {
+          resetBtn = document.createElement("div");
+          resetBtn.setAttribute(DATA.reset, "1");
+          resetBtn.setAttribute("role", "button");
+          resetBtn.setAttribute("tabindex", "0");
+          resetBtn.textContent = t ? t("reset") : DICT.zh.reset;
+          bindActivate(resetBtn, function () {
+            if (editing) resetAll();
+          });
+          nav.appendChild(resetBtn);
+        }
+        resetBtn.style.order = String(order + 1);
       }
-    }
 
-    function onPointerMove(e) {
-      if (!drag) return;
-      var dx = e.clientX - drag.startX;
-      var dy = e.clientY - drag.startY;
-      if (!drag.active) {
-        if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
-        drag.active = true;
-        drag.row.setAttribute("data-snm-dragging", "1");
-        try {
+      // div 补 role=button 后，键盘 Enter/Space 也要能激活
+      function bindActivate(el, fn) {
+        el.addEventListener("click", function (e) {
+          e.stopPropagation();
           e.preventDefault();
-        } catch (err) {}
+          fn();
+        });
+        el.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+            e.preventDefault();
+            e.stopPropagation();
+            fn();
+          }
+        });
       }
-      if (!drag.active) return;
-      try {
-        e.preventDefault();
-      } catch (err2) {}
-      var drop = computeDrop(drag.nav, e.clientY, drag);
-      clearDropMarks(drag.nav);
-      if (drop && drop.type === "into-group") {
-        var th = drag.nav.querySelector('[data-snm-group-id="' + drop.groupId + '"]');
-        if (th) th.setAttribute("data-snm-drop", "1");
-      }
-      applyDrop(drag, drop);
-      applyDom(); // 实时预览插入位置
-    }
 
-    function onPointerUp() {
-      if (!drag) return;
-      var wasDrag = drag.active;
-      var row = drag.row;
-      if (row) row.removeAttribute("data-snm-dragging");
-      if (drag.nav) clearDropMarks(drag.nav);
-      if (wasDrag) {
-        normalize();
-        applyDom();
+      // ── 抽屉操作 ───────────────────────────────────────────
+      function addGroup() {
+        var g = {
+          id: "g-" + groupSeq++,
+          name: t ? t("newGroup") : DICT.zh.newGroup,
+          collapsed: false,
+          items: [],
+        };
+        state.groups.push(g);
+        state.order.push(g.id);
+        sync();
         persist();
-        justActed = true;
-      }
-      drag = null;
-    }
-
-    var justActed = false; // 拖拽/眼睛操作后吞掉紧随的 click（防误触发导航）
-
-    function onClickCapture(e) {
-      if (justActed) {
-        justActed = false;
-        try {
-          e.preventDefault();
-          e.stopPropagation();
-        } catch (err) {}
-        return;
-      }
-      if (!editing) return;
-      var row = closestRow(e.target);
-      if (!row) return;
-      var rect = row.getBoundingClientRect();
-      var offRight = rect.right - e.clientX;
-      if (offRight <= ZONE_EYE) {
-        // 眼睛分区：吞掉导航，单击即切换显隐（不置 justActed，避免吞掉下一次点击）
-        try {
-          e.preventDefault();
-          e.stopPropagation();
-        } catch (err2) {}
-        toggleHidden(row.getAttribute("data-snm-id"));
-      }
-      // body 分区：普通点击 → 放行导航（不拦截）
-    }
-
-    function toggleHidden(id) {
-      if (!id) return;
-      var idx = state.hidden.indexOf(id);
-      if (idx >= 0) state.hidden.splice(idx, 1);
-      else state.hidden.push(id);
-      applyDom();
-      persist();
-    }
-
-    function closestRow(target) {
-      if (!target || !target.closest) return null;
-      return target.closest(SEL.navCell);
-    }
-    function closestGroupHeader(target) {
-      if (!target || !target.closest) return null;
-      return target.closest("[data-snm-group]");
-    }
-
-    // ── Escape 退出编辑 ─────────────────────────────────────────
-    function onKeyDown(e) {
-      if (e.key === "Escape" && editing) {
-        setEditing(false);
-      }
-    }
-
-    // ── 监听绑定（nav / document，随 apply 挂，return cleanup）───
-    function bindEvents(ctx) {
-      if (!document) return function () {};
-      function pd(e) {
-        onPointerDown(ctx, e);
-      }
-      function pm(e) {
-        onPointerMove(e);
-      }
-      function pu() {
-        onPointerUp();
-      }
-      function kc(e) {
-        onKeyDown(e);
-      }
-      document.addEventListener("pointerdown", pd, true);
-      document.addEventListener("pointermove", pm, true);
-      document.addEventListener("pointerup", pu, true);
-      document.addEventListener("click", onClickCapture, true);
-      document.addEventListener("keydown", kc, true);
-      return function () {
-        document.removeEventListener("pointerdown", pd, true);
-        document.removeEventListener("pointermove", pm, true);
-        document.removeEventListener("pointerup", pu, true);
-        document.removeEventListener("click", onClickCapture, true);
-        document.removeEventListener("keydown", kc, true);
-      };
-    }
-
-    // ── MutationObserver 自愈（React 重建 / 面板出现）────────────
-    function observe(ctx) {
-      if (!document || typeof MutationObserver === "undefined") return function () {};
-      var mo = new MutationObserver(function () {
         var nav = findNav();
         if (nav) {
-          if (nav.getAttribute("data-snm-nav") !== "1") {
-            refresh(ctx);
-          } else {
-            // 行数变化时重新认行（切语言 / 分区增删）
-            var marked = nav.querySelectorAll("[data-snm-row]").length;
-            if (marked !== navCells(nav).length) refresh(ctx);
-          }
-        } else {
-          // 面板关闭 → 编辑态复位（临时态不持久化）
-          if (editing) setEditing(false);
+          var header = findByAttr(nav, DATA.groupId, g.id);
+          if (header) startRename(header, g.id, header.querySelector("[" + DATA.groupName + "]"));
         }
-      });
-      mo.observe(document.body, { childList: true, subtree: true });
-      return function () {
-        mo.disconnect();
-      };
-    }
+        return g;
+      }
+      function dissolveGroup(gid) {
+        var g = findGroup(state, gid);
+        if (!g) return;
+        var pos = state.order.indexOf(gid);
+        var members = g.items.slice();
+        if (pos >= 0) {
+          state.order.splice(pos, 1);
+          for (var i = 0; i < members.length; i++) state.order.splice(pos + i, 0, members[i]);
+        } else {
+          for (var j = 0; j < members.length; j++) state.order.push(members[j]);
+        }
+        var gi = state.groups.indexOf(g);
+        if (gi >= 0) state.groups.splice(gi, 1);
+        sync();
+        persist();
+      }
+      function toggleCollapsed(gid) {
+        var g = findGroup(state, gid);
+        if (!g) return;
+        g.collapsed = !g.collapsed;
+        sync();
+        persist();
+      }
+      function renameGroup(gid, name) {
+        var g = findGroup(state, gid);
+        if (!g) return;
+        var clean = String(name === null || name === undefined ? "" : name)
+          .trim()
+          .slice(0, RENAME_MAX);
+        g.name = clean || (t ? t("newGroup") : DICT.zh.newGroup);
+        sync();
+        persist();
+      }
+      function resetAll() {
+        state = createState(null);
+        groupSeq = 1;
+        sync();
+        persist();
+        setNotice(t ? t("resetDone") : DICT.zh.resetDone);
+      }
 
-    // ── 齿轮按钮（settings.action 槽，order:-1 排「打开配置文件」左）──
-    function GearButton() {
-      var st = react.useState(editing);
-      var isEditing = st[0];
-      var setLocal = st[1];
-      react.useEffect(function () {
-        editingSubs.push(setLocal);
-        return function () {
-          var i = editingSubs.indexOf(setLocal);
-          if (i >= 0) editingSubs.splice(i, 1);
-        };
-      }, []);
-      var gearBtn = h(
-        "button",
-        {
-          type: "button",
-          "data-snm-gear": "1",
-          "data-snm-active": isEditing ? "1" : "0",
-          title: t ? (isEditing ? t("gearExit") : t("gear")) : "Edit navigation",
-          onClick: function () {
-            setEditing(!editing);
+      // ── 显隐 ───────────────────────────────────────────────
+      function toggleHidden(id) {
+        if (!id) return;
+        var cell = findRow(id);
+        var wasActive = !!cell && cell.getAttribute("aria-current") === "true";
+        var idx = state.hidden.indexOf(id);
+        if (idx >= 0) state.hidden.splice(idx, 1);
+        else state.hidden.push(id);
+        sync();
+        persist();
+        // 隐藏了当前分区 → 切到第一个可见分区，避免「左边没高亮、右边还有内容」
+        if (wasActive && idx < 0) focusVisibleRow(id);
+      }
+      function focusVisibleRow(excludeId) {
+        var nav = findNav();
+        if (!nav) return;
+        var cells = navCells(nav);
+        for (var i = 0; i < cells.length; i++) {
+          var rid = cells[i].getAttribute(DATA.id);
+          if (!rid || rid === excludeId) continue;
+          if (cells[i].getAttribute(DATA.hidden) === "1") continue;
+          if (cells[i].getAttribute(DATA.collapsed) === "1") continue;
+          try {
+            cells[i].click();
+          } catch (e) {
+            dbg("focus row", e);
+          }
+          return;
+        }
+      }
+      function findRow(id) {
+        var nav = findNav();
+        if (!nav) return null;
+        var cells = navCells(nav);
+        for (var i = 0; i < cells.length; i++) {
+          if (cells[i].getAttribute(DATA.id) === id) return cells[i];
+        }
+        return null;
+      }
+
+      // ── 编辑模式 ───────────────────────────────────────────
+      function setEditing(v) {
+        v = !!v;
+        if (editing === v) return;
+        editing = v;
+        if (!v) endDrag(false);
+        sync();
+        publish();
+      }
+
+      // ── 拖拽 ───────────────────────────────────────────────
+      function closestRow(target) {
+        if (!target || !target.closest) return null;
+        return target.closest(SEL.navCell);
+      }
+      function closestGroupHeader(target) {
+        if (!target || !target.closest) return null;
+        return target.closest("[" + DATA.group + "]");
+      }
+      function clearDropMarks(nav) {
+        if (!nav) return;
+        var marked = nav.querySelectorAll("[" + DATA.drop + "]");
+        for (var i = 0; i < marked.length; i++) marked[i].removeAttribute(DATA.drop);
+      }
+      function collectSlots(nav, excludeId) {
+        var els = [];
+        var cells = navCells(nav);
+        for (var i = 0; i < cells.length; i++) {
+          var id = cells[i].getAttribute(DATA.id);
+          if (id && id !== excludeId) els.push({ el: cells[i], kind: "row", id: id });
+        }
+        var heads = nav.querySelectorAll("[" + DATA.group + "]");
+        for (var j = 0; j < heads.length; j++) {
+          var gid = heads[j].getAttribute(DATA.groupId);
+          if (gid && gid !== excludeId) els.push({ el: heads[j], kind: "group", id: gid });
+        }
+        for (var k = 0; k < els.length; k++) {
+          var r = els[k].el.getBoundingClientRect();
+          els[k].top = r.top;
+          els[k].bottom = r.bottom;
+          els[k].mid = r.top + r.height / 2;
+        }
+        els.sort(function (a, b) {
+          return a.top - b.top;
+        });
+        return els;
+      }
+      function computeDrop(nav, clientY, dragState) {
+        if (!dragState.isGroup) {
+          var heads = nav.querySelectorAll("[" + DATA.group + "]");
+          for (var i = 0; i < heads.length; i++) {
+            var hr = heads[i].getBoundingClientRect();
+            if (clientY >= hr.top && clientY <= hr.bottom) {
+              return { type: "into-group", groupId: heads[i].getAttribute(DATA.groupId) };
+            }
+          }
+        }
+        var els = collectSlots(nav, dragState.id);
+        var ref = null;
+        for (var s = 0; s < els.length; s++) {
+          if (clientY < els[s].mid) {
+            ref = els[s];
+            break;
+          }
+        }
+        if (!ref) return { type: "insert-end" };
+        if (ref.kind === "group") return { type: "insert-before", refType: "group", refId: ref.id };
+        var gid = ref.el.getAttribute(DATA.inGroup);
+        return { type: "insert-before", refType: "row", refId: ref.id, refGroup: gid || null };
+      }
+
+      function onPointerDown(e) {
+        if (!editing || disposed) return;
+        if (e.button !== undefined && e.button !== 0) return;
+        var nav = findNav();
+        if (!nav) return;
+        var row = closestRow(e.target);
+        var header = closestGroupHeader(e.target);
+        var onControl = e.target.closest
+          ? e.target.closest("[" + DATA.groupInput + "],[" + DATA.groupDissolve + "]")
+          : null;
+        if (row) {
+          var rect = row.getBoundingClientRect();
+          if (rect.right - e.clientX <= ZONE_EYE) return; // 眼睛分区：交给 click
+          drag = {
+            id: row.getAttribute(DATA.id),
+            isGroup: false,
+            startX: e.clientX,
+            startY: e.clientY,
+            lastY: e.clientY,
+            active: false,
+            nav: nav,
+            el: row,
+            base: null,
+            pointerId: e.pointerId,
+          };
+        } else if (header && !onControl) {
+          drag = {
+            id: header.getAttribute(DATA.groupId),
+            isGroup: true,
+            startX: e.clientX,
+            startY: e.clientY,
+            lastY: e.clientY,
+            active: false,
+            nav: nav,
+            el: header,
+            base: null,
+            pointerId: e.pointerId,
+          };
+        }
+      }
+
+      function onPointerMove(e) {
+        if (!drag) return;
+        var dx = e.clientX - drag.startX;
+        var dy = e.clientY - drag.startY;
+        if (!drag.active) {
+          if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+          drag.active = true;
+          drag.base = cloneState(state); // 快照：取消时可完整回滚
+          drag.el.setAttribute(DATA.dragging, "1");
+          if (drag.pointerId !== undefined && drag.el.setPointerCapture) {
+            try {
+              drag.el.setPointerCapture(drag.pointerId);
+            } catch (err) {
+              dbg("pointer capture", err);
+            }
+          }
+        }
+        drag.lastY = e.clientY;
+        try {
+          e.preventDefault();
+        } catch (err2) {}
+        // 同一帧内多次 move 只算一次（合并到最新落点）
+        scheduleFrame(function () {
+          if (!drag || !drag.active) return;
+          var drop = computeDrop(drag.nav, drag.lastY, drag);
+          clearDropMarks(drag.nav);
+          if (drop && drop.type === "into-group") {
+            var th = findByAttr(drag.nav, DATA.groupId, drop.groupId);
+            if (th) th.setAttribute(DATA.drop, "1");
+          }
+          state = applyDropTo(drag.base, drag, drop);
+          applyDom(drag.nav); // 实时预览
+        });
+      }
+
+      function endDrag(commit) {
+        if (!drag) return;
+        var wasActive = drag.active;
+        var el = drag.el;
+        if (el) el.removeAttribute(DATA.dragging);
+        if (drag.nav) clearDropMarks(drag.nav);
+        if (wasActive && !commit && drag.base) state = drag.base; // 取消 → 回滚
+        drag = null;
+        if (wasActive) {
+          justActedAt = Date.now();
+          sync();
+          if (commit) persist();
+        }
+      }
+
+      // ── 事件 ───────────────────────────────────────────────
+      function onClickCapture(e) {
+        var elapsed = Date.now() - justActedAt;
+        if (justActedAt && elapsed >= 0 && elapsed < TAP_GUARD_MS) {
+          justActedAt = 0;
+          try {
+            e.preventDefault();
+            e.stopPropagation();
+          } catch (err) {}
+          return;
+        }
+        if (!editing || disposed) return;
+        var row = closestRow(e.target);
+        if (!row) return;
+        var rect = row.getBoundingClientRect();
+        if (rect.right - e.clientX <= ZONE_EYE) {
+          try {
+            e.preventDefault();
+            e.stopPropagation();
+          } catch (err2) {}
+          toggleHidden(row.getAttribute(DATA.id));
+        }
+      }
+
+      function onKeyDown(e) {
+        if (disposed) return;
+        // 改名输入框内：Escape 交给输入框自己（捕获阶段必须先让路）
+        if (e.target && e.target.getAttribute && e.target.getAttribute(DATA.groupInput)) return;
+        if (!editing) return;
+        if (e.key === "Escape") {
+          if (e.target && e.target.closest && e.target.closest("input,textarea,[contenteditable]")) return;
+          setEditing(false);
+          return;
+        }
+        var row = closestRow(e.target);
+        var header = closestGroupHeader(e.target);
+        if (header && !row) {
+          if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleCollapsed(header.getAttribute(DATA.groupId));
+            return;
+          }
+          if (e.key === "F2") {
+            e.preventDefault();
+            e.stopPropagation();
+            startRename(header, header.getAttribute(DATA.groupId), header.querySelector("[" + DATA.groupName + "]"));
+            return;
+          }
+          if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+            e.preventDefault();
+            e.stopPropagation();
+            state = nudgeState(state, header.getAttribute(DATA.groupId), e.key === "ArrowUp" ? -1 : 1);
+            sync();
+            persist();
+          }
+          return;
+        }
+        if (!row) return;
+        var id = row.getAttribute(DATA.id);
+        if (!id) return;
+        if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+          e.preventDefault();
+          e.stopPropagation();
+          state = nudgeState(state, id, e.key === "ArrowUp" ? -1 : 1);
+          sync();
+          persist();
+          return;
+        }
+        if (!e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "h" || e.key === "H")) {
+          e.preventDefault();
+          e.stopPropagation();
+          toggleHidden(id);
+        }
+      }
+
+      function bindEvents() {
+        function pd(e) {
+          onPointerDown(e);
+        }
+        function pm(e) {
+          onPointerMove(e);
+        }
+        function pu() {
+          endDrag(true);
+        }
+        function pc() {
+          endDrag(false);
+        }
+        function bl() {
+          endDrag(false);
+        }
+        function kc(e) {
+          onKeyDown(e);
+        }
+        document.addEventListener("pointerdown", pd, true);
+        document.addEventListener("pointermove", pm, true);
+        document.addEventListener("pointerup", pu, true);
+        document.addEventListener("pointercancel", pc, true);
+        document.addEventListener("click", onClickCapture, true);
+        document.addEventListener("keydown", kc, true);
+        window.addEventListener("blur", bl);
+        document.addEventListener("visibilitychange", bl);
+        cleanups.push(function () {
+          document.removeEventListener("pointerdown", pd, true);
+          document.removeEventListener("pointermove", pm, true);
+          document.removeEventListener("pointerup", pu, true);
+          document.removeEventListener("pointercancel", pc, true);
+          document.removeEventListener("click", onClickCapture, true);
+          document.removeEventListener("keydown", kc, true);
+          window.removeEventListener("blur", bl);
+          document.removeEventListener("visibilitychange", bl);
+        });
+      }
+
+      // ── 观察：body 直接子节点（面板出现/消失）+ nav 自身 ─────────
+      function fingerprint(nav) {
+        var cells = navCells(nav);
+        var parts = [String(cells.length)];
+        for (var i = 0; i < cells.length; i++) parts.push(rowLabel(cells[i]));
+        return parts.join("\u0001");
+      }
+      function scheduleFrame(fn) {
+        if (typeof requestAnimationFrame !== "function") {
+          fn();
+          return;
+        }
+        if (rafId) return; // 合并同帧
+        rafId = requestAnimationFrame(function () {
+          rafId = 0;
+          try {
+            fn();
+          } catch (e) {
+            dbg("frame", e);
+          }
+        });
+      }
+      function scheduleTick() {
+        if (disposed) return;
+        scheduleFrame(tick);
+      }
+      function tick() {
+        if (disposed) return;
+        var nav = findNav();
+        if (!nav) {
+          detachNavObserver();
+          if (editing) setEditing(false);
+          lastFingerprint = "";
+          return;
+        }
+        attachNavObserver(nav);
+        var fp = fingerprint(nav);
+        if (nav.getAttribute(DATA.nav) !== "1" || fp !== lastFingerprint) {
+          lastFingerprint = fp;
+          sync();
+        }
+      }
+      function attachNavObserver(nav) {
+        if (navNode === nav && navMo) return;
+        detachNavObserver();
+        navNode = nav;
+        if (typeof MutationObserver === "undefined") return;
+        navMo = new MutationObserver(scheduleTick);
+        navMo.observe(nav, { childList: true, characterData: true, subtree: true });
+      }
+      function detachNavObserver() {
+        if (navMo) {
+          try {
+            navMo.disconnect();
+          } catch (e) {
+            dbg("disconnect nav", e);
+          }
+        }
+        navMo = null;
+        navNode = null;
+      }
+      function observe() {
+        if (!document || typeof MutationObserver === "undefined") return;
+        // 面板是 createPortal 到 document.body 的直接子节点：
+        // 只听 body 的直接 childList 就够，不必订阅整棵子树。
+        bodyMo = new MutationObserver(scheduleTick);
+        bodyMo.observe(document.body, { childList: true });
+        cleanups.push(function () {
+          if (bodyMo) {
+            try {
+              bodyMo.disconnect();
+            } catch (e) {
+              dbg("disconnect body", e);
+            }
+          }
+          bodyMo = null;
+          detachNavObserver();
+        });
+      }
+
+      // ── 齿轮按钮 ───────────────────────────────────────────
+      function GearButton() {
+        var tickState = react.useState(0);
+        var force = tickState[1];
+        react.useEffect(function () {
+          uiSubs.push(force);
+          return function () {
+            var i = uiSubs.indexOf(force);
+            if (i >= 0) uiSubs.splice(i, 1);
+          };
+        }, []);
+        var label = t ? (editing ? t("gearExit") : t("gear")) : DICT.zh.gear;
+        var gearBtn = h(
+          "button",
+          {
+            type: "button",
+            "data-snm-gear": "1",
+            "data-snm-active": editing ? "1" : "0",
+            "aria-label": label,
+            "aria-pressed": editing ? "true" : "false",
+            title: label,
+            onClick: function () {
+              setEditing(!editing);
+            },
+            style: {
+              background: editing ? "var(--dsw-alias-accent,#247bbf)" : "transparent",
+              color: editing ? "#fff" : "inherit",
+              border: "1px solid var(--dsw-alias-border,rgba(128,128,128,.35))",
+              borderRadius: "6px",
+              cursor: "pointer",
+              fontSize: "14px",
+              lineHeight: "1",
+              padding: "5px 8px",
+            },
           },
-          style: {
-            background: isEditing ? "var(--dsw-alias-accent,#247bbf)" : "transparent",
-            color: isEditing ? "#fff" : "inherit",
-            border: "1px solid var(--dsw-alias-border,rgba(128,128,128,.35))",
-            borderRadius: "6px",
-            cursor: "pointer",
-            fontSize: "14px",
-            lineHeight: "1",
-            padding: "5px 8px",
-          },
-        },
-        "⚙",
-      );
-      // 编辑模式：齿轮左侧显示操作说明（退出即隐藏）。根元素恒为 div，避免按钮/容器切换重挂。
-      return h(
-        "div",
-        {
-          "data-snm-gear-wrap": "1",
-          style: {
-            display: "flex",
-            alignItems: "center",
-            gap: "8px",
-            minWidth: 0,
-            marginLeft: "6px",
-          },
-        },
-        isEditing
+          "⚙",
+        );
+        var hint = editing
           ? h(
               "span",
               {
                 "data-snm-hint": "1",
+                title: t ? t("keyboardHint") : DICT.zh.keyboardHint,
                 style: {
                   fontSize: "12px",
                   lineHeight: "1.3",
@@ -1052,27 +1525,54 @@ window.__ModuleLoader__.load({
                   maxWidth: "280px",
                 },
               },
-              t ? t("editHint") : "拖拽排序 · 点眼睛隐藏 · 可收纳",
+              t ? t("editHint") : DICT.zh.editHint,
             )
-          : null,
-        gearBtn,
-      );
-    }
+          : null;
+        var noticeEl = notice
+          ? h(
+              "span",
+              {
+                "data-snm-notice": "1",
+                role: "status",
+                style: {
+                  fontSize: "12px",
+                  lineHeight: "1.3",
+                  color: "var(--dsw-alias-state-error-primary,#c33)",
+                  whiteSpace: "nowrap",
+                },
+              },
+              notice,
+            )
+          : null;
+        var live = h("span", { "data-snm-sr": "1", role: "status", "aria-live": "polite" }, notice || "");
+        return h(
+          "div",
+          {
+            "data-snm-gear-wrap": "1",
+            style: {
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              minWidth: 0,
+              marginLeft: "6px",
+            },
+          },
+          hint,
+          noticeEl,
+          live,
+          gearBtn,
+        );
+      }
 
-    // ── apply(ctx) ─────────────────────────────────────────────
-    function apply(ctx) {
+      // ── 装配 ───────────────────────────────────────────────
       t = ctx.locale.bind(NS);
       ctx.effect(function () {
-        return ctx.locale.register(NS, { zh: zh, en: en });
+        return ctx.locale.register(NS, DICT);
       }, NS + ": dictionaries");
-
-      ctxRef = ctx;
-      // 先用默认态标 DOM，再异步拉真实 order/hidden（异常回退默认）。
-      state = { order: [], groups: [], hidden: [] };
-      refresh(ctx);
-      loadStateAsync();
-
-      // 齿轮按钮：settings.action 槽 order:-1
+      ctx.effect(function () {
+        ensureStyles();
+        return removeStyles;
+      }, NS + ": styles");
       ctx.effect(function () {
         return ctx.slots.inject("settings.action", function () {
           return ctx.slots.register(
@@ -1087,18 +1587,76 @@ window.__ModuleLoader__.load({
         });
       }, NS + ": gear");
 
-      var unbind = bindEvents(ctx);
-      var unobserve = observe(ctx);
+      sync(); // 先用默认态标一次，随后异步拉真实排版
+      loadState();
+      bindEvents();
+      observe();
+
       ctx.effect(function () {
         return function () {
-          unbind();
-          unobserve();
+          disposed = true;
+          if (rafId && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
+          rafId = 0;
+          if (noticeTimer) clearTimeout(noticeTimer);
+          noticeTimer = null;
+          while (cleanups.length) {
+            var fn = cleanups.pop();
+            try {
+              fn();
+            } catch (e) {
+              dbg("cleanup", e);
+            }
+          }
+          // 摘掉挂在宿主 DOM 上的痕迹
+          try {
+            var nav = findNav();
+            if (nav) {
+              nav.removeAttribute(DATA.nav);
+              nav.removeAttribute(DATA.editing);
+              var injected = nav.querySelectorAll(
+                "[" + DATA.group + "],[" + DATA.addGroup + "],[" + DATA.reset + "]",
+              );
+              for (var i = 0; i < injected.length; i++) injected[i].remove();
+              var marked = nav.querySelectorAll("[" + DATA.row + "]");
+              for (var j = 0; j < marked.length; j++) {
+                marked[j].removeAttribute(DATA.row);
+                marked[j].removeAttribute(DATA.id);
+                marked[j].removeAttribute(DATA.hidden);
+                marked[j].removeAttribute(DATA.inGroup);
+                marked[j].removeAttribute(DATA.collapsed);
+                marked[j].removeAttribute(DATA.dragging);
+                marked[j].style.order = "";
+              }
+            }
+            removeStyles();
+          } catch (e2) {
+            dbg("cleanup dom", e2);
+          }
+          uiSubs.length = 0;
         };
-      }, NS + ": dom");
+      }, NS + ": lifecycle");
+    }
+
+    function apply(ctx) {
+      createPlugin(ctx);
     }
 
     exports.apply = apply;
     exports.inject = ["slots", "locale", "remote", "remote.settings"];
+    // 测试接缝：只暴露纯函数与文案表，供 node --test 直接调用
+    exports.__test = {
+      NS: NS,
+      DICT: DICT,
+      buildCss: buildCss,
+      createState: createState,
+      normalizeState: normalizeState,
+      serializeState: serializeState,
+      applyDropTo: applyDropTo,
+      nudgeState: nudgeState,
+      projectSections: projectSections,
+      knownIdsFrom: knownIdsFrom,
+      sectionIds: sectionIds,
+    };
     return module.exports;
   },
 });

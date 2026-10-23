@@ -4,3 +4,7 @@ pnpm-lock.yaml
 package-lock.json
 *.log
 .DS_Store
+
+# e2e 运行时生成（test/e2e.mjs 会自动清理）
+test/harness/under-test.js
+test/harness/legacy.js
