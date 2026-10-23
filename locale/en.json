@@ -33,5 +33,15 @@
   "entryHideHint": "Show the “Settings navigation” row in the left sidebar again",
   "entryFailed": "Could not toggle the sidebar entry — try again",
   "entryOffBanner": "Sidebar entry is hidden",
-  "entryRestore": "Restore entry"
+  "entryRestore": "Restore entry",
+  "pin": "Pin to sidebar",
+  "unpin": "Unpin",
+  "pinState": "Pinned to sidebar",
+  "pinLimit": "Up to 5 pinned sections — unpin one first",
+  "pinHiddenBlocked": "Hidden sections cannot be pinned",
+  "pinRowHint": "Pinned sections open their settings in one click",
+  "pinPageTitle": "This section is open in settings",
+  "pinPageBack": "Back to settings navigation",
+  "pinPageOpen": "Open settings again",
+  "pinFailed": "Could not toggle the pinned row — try again"
 }

@@ -49,7 +49,7 @@ const ORDER = T.sectionIds(SECTIONS);
 test("createState：脏数据一律回退默认，不抛异常", () => {
   for (const bad of [null, undefined, 42, "x", [], { order: "nope", groups: {}, hidden: 1 }]) {
     const s = T.createState(bad);
-    assert.deepEqual(s, { version: 1, order: [], groups: [], hidden: [], hideEntry: false });
+    assert.deepEqual(s, { version: 1, order: [], groups: [], hidden: [], hideEntry: false, pinned: [] });
   }
   const s = T.createState({
     order: ["a", 1, "b"],
@@ -354,6 +354,9 @@ test("buildCss：侧栏入口页的选择器齐全", () => {
     "[data-snm-page-glyph]",
     "[data-snm-page-badge]",
     "[data-snm-page-empty]",
+    "[data-snm-page-item]",
+    "[data-snm-page-pin]",
+    '[data-snm-page-pin][data-snm-page-pin-state="1"]',
   ]) {
     assert.ok(css.includes(sel), "CSS 缺少 " + sel);
   }
@@ -408,4 +411,97 @@ test("hideEntry：恢复默认后入口必须重新出现", () => {
   assert.equal(T.createState({ hideEntry: true }).hideEntry, true);
   assert.equal(T.createState(null).hideEntry, false, "恢复默认 = 侧栏入口重新显示");
 });
+
+// ── 阶段 2：固定分区到侧栏 ─────────────────────────────────────
+test("pinnedIds：去重、去隐藏、去未知，已知集合为空时不裁剪", () => {
+  const st = T.createState({ pinned: ["general", "general", "plugins", "ghost"], hidden: ["plugins"] });
+  assert.deepEqual(T.pinnedIds(st, KNOWN), ["general"], "plugins 被隐藏、ghost 不存在，都该剔掉");
+  assert.deepEqual(
+    T.pinnedIds(st, {}),
+    ["general", "ghost"],
+    "冷启动 known 为空：只按隐藏剔除，不误删还没注册的分区",
+  );
+  assert.deepEqual(T.pinnedIds(T.createState(null), KNOWN), [], "老数据没有 pinned 也不能崩");
+  assert.deepEqual(T.pinnedIds({ pinned: "nope" }, KNOWN), [], "非数组容错");
+});
+
+test("togglePinnedState：切换要返回新对象，不改原状态", () => {
+  const base = T.createState({ order: ["general", "models"] });
+  const on = T.togglePinnedState(base, "models", KNOWN);
+  assert.equal(on.reason, "pinned");
+  assert.deepEqual(on.state.pinned, ["models"]);
+  assert.deepEqual(base.pinned, [], "原状态被就地改了（会破坏 publish/undo 的一致性）");
+  assert.deepEqual(on.state.order, base.order, "固定不该动顺序");
+
+  const off = T.togglePinnedState(on.state, "models", KNOWN);
+  assert.equal(off.reason, "unpinned");
+  assert.deepEqual(off.state.pinned, []);
+});
+
+test("togglePinnedState：上限、隐藏、未知三种拒绝都要带 reason", () => {
+  const five = ["general", "account", "models", "plugins", "a"];
+  const known5 = { general: 1, account: 1, models: 1, plugins: 1, a: 1, b: 1 };
+  const hitLimit = T.togglePinnedState(T.createState({ pinned: five }), "b", known5);
+  assert.equal(hitLimit.reason, "limit", "第 6 个就该被上限拦下");
+  assert.equal(hitLimit.state.pinned.length, 5, "拒绝时不能悄悄写进去");
+
+  const hidden = T.togglePinnedState(T.createState({ hidden: ["plugins"] }), "plugins", KNOWN);
+  assert.equal(hidden.reason, "hidden");
+
+  const unknown = T.togglePinnedState(T.createState(null), "ghost", KNOWN);
+  assert.equal(unknown.reason, "unknown");
+
+  const emptyKnown = T.togglePinnedState(T.createState(null), "ghost", {});
+  assert.equal(emptyKnown.reason, "pinned", "分区还没注册完时不该把固定操作判死");
+});
+
+test("togglePinnedState：上限就是 MAX_PINNED，别写死第二个数", () => {
+  const ids = ["general", "account", "models", "plugins", "a", "b"];
+  const known = {};
+  for (const id of ids) known[id] = 1;
+  let st = T.createState(null);
+  let accepted = 0;
+  for (const id of ids) {
+    const res = T.togglePinnedState(st, id, known);
+    if (res.reason === "pinned") {
+      accepted++;
+      st = res.state;
+    }
+  }
+  assert.equal(accepted, T.MAX_PINNED);
+  assert.equal(st.pinned.length, T.MAX_PINNED);
+});
+
+test("labelOf：按 id 实时取名字，取不到就退回 id", () => {
+  assert.equal(T.labelOf(SECTIONS, "models"), "模型");
+  assert.equal(T.labelOf(SECTIONS, "ghost"), "ghost");
+  assert.equal(T.labelOf([], "models"), "models", "分区还没注册时不能抛");
+});
+
+test("固定行的注册契约：id/order 都得让开宿主短名与入口位", () => {
+  assert.ok(T.PIN_ORDER_BASE > T.ENTRY_ORDER, "固定行要排在「设置导航」入口之后");
+  assert.ok(T.PIN_ID_PREFIX.length > 0);
+  assert.ok(!T.PIN_ID_PREFIX.startsWith("settings-nav-manager."), "固定行 id 不该冒充面板 id");
+  assert.ok(SRC.includes('ctx.slots.inject("main"'), "固定行必须配兜底 main 页，否则 selectPanel 会抛");
+  assert.ok(SRC.includes('ctx.slots.inject("sidebar.panellist"'), "缺少固定行的侧栏注册");
+  assert.ok(SRC.includes('document.addEventListener("click"'), "缺少点击拦截");
+});
+
+test("pinned 也要进写盘载荷：否则固定行重启就没了", () => {
+  const st = T.normalizeState(T.createState({ pinned: ["models", "ghost"] }), KNOWN, ORDER);
+  assert.deepEqual(st.pinned, ["models", "ghost"], "与 order 同策略：没见到的分区先留着，写盘前再清");
+  const payload = T.serializeState(st, KNOWN);
+  assert.deepEqual(payload.pinned, ["models"], "未知分区不落盘");
+});
+
+test("pinned：被隐藏的分区自动取消固定", () => {
+  const st = T.normalizeState(
+    T.createState({ pinned: ["plugins", "models"], hidden: ["plugins"] }),
+    KNOWN,
+    ORDER,
+  );
+  assert.deepEqual(st.pinned, ["models"], "隐藏项不能留在侧栏上（方案 §3.3）");
+  assert.equal(T.serializeState(st, KNOWN).pinned.length, 1);
+});
+
 

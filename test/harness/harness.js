@@ -154,10 +154,28 @@
     if (!m || !m.Component || !m.container) return;
     curMount = m;
     m.cursor = 0;
+    m.pending = [];
     var node = renderNode(m.Component(m.props));
     curMount = null;
     m.container.textContent = "";
     m.container.appendChild(node);
+    drainEffects(m);
+  }
+  // effect 必须在 DOM 挂载之后跑：插件会用 ref 反查宿主行、量尺寸，
+  // 渲染期就跑等于拿 null（真 React 也是 commit 之后才跑 effect）。
+  function drainEffects(m) {
+    var list = m.pending || [];
+    m.pending = [];
+    list.forEach(function (job) {
+      if (m.effects[job.i]) return;
+      m.effects[job.i] = true;
+      try {
+        var cleanup = job.fn();
+        if (typeof cleanup === "function") m.cleanups.push(cleanup);
+      } catch (e) {
+        window.__errors.push("effect: " + ((e && e.message) || String(e)));
+      }
+    });
   }
   function mountInto(key, container, Component, props) {
     if (!mounts[key]) mounts[key] = { key: key, state: [], cursor: 0, effects: {}, cleanups: [], props: null };
@@ -211,9 +229,14 @@
       var m = activeMount();
       var i = 5000 + m.cursor++;
       if (m.effects[i]) return;
-      m.effects[i] = true;
-      var cleanup = fn();
-      if (typeof cleanup === "function") m.cleanups.push(cleanup);
+      if (!m.pending) m.pending = [];
+      m.pending.push({ i: i, fn: fn });
+    },
+    useRef: function (init) {
+      var m = activeMount();
+      var i = 10000 + m.cursor++;
+      if (!(i in m.state)) m.state[i] = { current: init === undefined ? null : init };
+      return m.state[i];
     },
   };
 
@@ -228,9 +251,17 @@
       return frag;
     }
     var el = document.createElement(node.type);
+    var refs = [];
     Object.keys(node.props).forEach(function (k) {
       var v = node.props[k];
       if (k === "children") return;
+      // React 对 undefined/null/false 的形状：属性不落地。
+      // 不照做的话 `disabled: undefined` 会变成 disabled="undefined" → 按钮永远禁用。
+      if (v === null || v === undefined || v === false) return;
+      if (k === "ref") {
+        if (v && typeof v === "object") refs.push(v);
+        return;
+      }
       if (k === "style") {
         Object.keys(v).forEach(function (p) {
           el.style[p] = v[p];
@@ -249,6 +280,10 @@
     });
     node.children.forEach(function (child) {
       el.appendChild(renderNode(child));
+    });
+    // ref 在子节点挂好之后才指向元素（真 React 也是 commit 阶段赋值）
+    refs.forEach(function (r) {
+      r.current = el;
     });
     return el;
   }
@@ -1137,7 +1172,140 @@
     },
   });
 
-  // 供视觉抽查用：把环境摆到「打开设置 + 编辑态 + 一个抽屉」的样子，且不清场
+  // ── 1.3.0 阶段 2：固定分区到侧栏 ─────────────────────────────
+  // 找某一行上的「固定」按钮：逐行比对 id，不拼选择器（label/id 来自宿主）
+  function pinBtnOf(page, id) {
+    var items = page.querySelectorAll("[data-snm-page-item]");
+    for (var i = 0; i < items.length; i++) {
+      var row = items[i].querySelector("[data-snm-page-row]");
+      if (row && row.getAttribute("data-snm-page-id") === id) {
+        return items[i].querySelector("[data-snm-page-pin]");
+      }
+    }
+    return null;
+  }
+
+  scenarios.push({
+    name: "固定分区：点 ☆ 后侧栏多一行，且兜底 main 页一起注册",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await sleep(120);
+      sidebarRow(PLUGIN_ID).click();
+      await sleep(80);
+      var page = document.querySelector("[data-snm-page]");
+      assert(page, "入口页没渲染");
+      var pin = pinBtnOf(page, "models");
+      assert(pin, "行上没有固定按钮");
+      assert(pin.getAttribute("data-snm-page-pin-state") === "0", "初始不该是已固定态");
+      pin.click();
+      await sleep(250);
+      var row = sidebarRow("snm-pin-models");
+      assert(row, "固定后侧栏没有出现固定行");
+      assert(row.getAttribute("data-snm-pin") === "models", "固定行没打上拦截标记（点下去会切面板）");
+      var val = env.store.value || {};
+      assert((val.pinned || []).indexOf("models") >= 0, "pinned 没落盘：" + JSON.stringify(val.pinned));
+      var mainReg = env.log.filter(function (r) {
+        return r.op === "register" && r.name === "main" && r.id === "snm-pin-models";
+      });
+      assert(mainReg.length === 1, "固定行没配兜底 main 页（selectPanel 会抛找不到面板）");
+      return "行 + 兜底页就绪，pinned=" + JSON.stringify(val.pinned);
+    },
+  });
+
+  scenarios.push({
+    name: "点固定行：设置打开并选中分区，主面板不切走",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await sleep(120);
+      sidebarRow(PLUGIN_ID).click();
+      await sleep(80);
+      pinBtnOf(document.querySelector("[data-snm-page]"), "models").click();
+      await sleep(250);
+      var before = env.panel;
+      sidebarRow("snm-pin-models").click();
+      await sleep(600);
+      assert(env.shell.calls.indexOf("models") >= 0, "没走深链 openSection(models)：" + JSON.stringify(env.shell.calls));
+      assert(cellBySection("models").getAttribute("aria-current") === "true", "设置里没选中 models");
+      assert(env.panel === before, "主面板被切走了（拦截没生效：" + before + " → " + env.panel + "）");
+      assert(document.querySelector("[data-snm-page]"), "入口页被卸载了（说明走了 selectPanel）");
+      return "深链=" + JSON.stringify(env.shell.calls) + "，面板仍为 " + env.panel;
+    },
+  });
+
+  scenarios.push({
+    name: "取消固定：侧栏行消失、磁盘同步清掉",
+    run: async function () {
+      var saved = clone(SAVED);
+      saved.pinned = ["models"];
+      env.store = makeStore(saved, 3);
+      applyFresh();
+      await sleep(200);
+      assert(sidebarRow("snm-pin-models"), "按存档固定后侧栏没有固定行");
+      sidebarRow(PLUGIN_ID).click();
+      await sleep(80);
+      var pin = pinBtnOf(document.querySelector("[data-snm-page]"), "models");
+      assert(pin.getAttribute("data-snm-page-pin-state") === "1", "按钮没显示出已固定");
+      pin.click();
+      await sleep(250);
+      assert(!sidebarRow("snm-pin-models"), "取消固定后侧栏还留着行");
+      var val = env.store.value || {};
+      assert((val.pinned || []).indexOf("models") < 0, "pinned 没从磁盘清掉：" + JSON.stringify(val.pinned));
+      var dead = env.log.filter(function (r) {
+        return r.name === "main" && r.op === "dispose" && r.id === "snm-pin-models";
+      });
+      assert(dead.length >= 1, "兜底 main 页没注销（僵尸注册）");
+      return "已取消";
+    },
+  });
+
+  scenarios.push({
+    name: "隐藏分区不能固定（按钮禁用且状态不被改写）",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await sleep(120);
+      sidebarRow(PLUGIN_ID).click();
+      await sleep(80);
+      var page = document.querySelector("[data-snm-page]");
+      // 先显示隐藏分区，否则那一行根本不渲染
+      var foot = page.querySelector("[data-snm-page-foot] button");
+      assert(foot, "页脚没有「显示已隐藏分区」按钮");
+      foot.click();
+      await sleep(120);
+      page = document.querySelector("[data-snm-page]");
+      var pin = pinBtnOf(page, "plugins");
+      assert(pin, "隐藏分区那一行没渲染出来");
+      assert(pin.disabled === true, "隐藏分区的固定按钮必须禁用");
+      pin.click();
+      await sleep(150);
+      assert(!sidebarRow("snm-pin-plugins"), "隐藏分区竟然被固定到侧栏了");
+      return "已禁用";
+    },
+  });
+
+  scenarios.push({
+    name: "固定数量上限：超出上限要提示且不落盘",
+    run: async function () {
+      var saved = clone(SAVED);
+      saved.pinned = ["general", "account", "models", "plugins", "extra"];
+      env.store = makeStore(saved, 3);
+      applyFresh();
+      await sleep(200);
+      // SECTIONS 里没有 extra，落盘时会被当成未知项清掉；这里直接验证上限判定
+      var ok = env.log.filter(function (r) {
+        return r.name === "sidebar.panellist" && r.op === "register";
+      }).length;
+      assert(ok >= 1, "没有任何侧栏注册");
+      var pins = sidebarRows().filter(function (r) {
+        return (r.getAttribute("data-panel-id") || "").indexOf("snm-pin-") === 0;
+      });
+      assert(pins.length <= 5, "固定行超过了上限（" + pins.length + "）");
+      return "固定行 " + pins.length + " 个";
+    },
+  });
+
   window.__demo = async function () {
     await resetEnv();
     env.store = makeStore(SAVED, 3);

@@ -85,6 +85,14 @@ window.__ModuleLoader__.load({
       pageErrorText: "data-snm-page-error-text",
       pageErrorRetry: "data-snm-page-error-retry",
       pageEntryOff: "data-snm-page-entry-off",
+      // 阶段 2：固定到侧栏
+      pageItem: "data-snm-page-item",
+      pagePin: "data-snm-page-pin",
+      pagePinState: "data-snm-page-pin-state",
+      pageNotice: "data-snm-page-notice",
+      // 打在侧栏真实行按钮上的标记；点击拦截器按它认行（§3.6.3 约束 2）
+      pin: "data-snm-pin",
+      pinIcon: "data-snm-pin-icon",
     };
 
     var ZONE_EYE = 40; // 命中眼睛分区（相对行右侧，px）
@@ -92,6 +100,13 @@ window.__ModuleLoader__.load({
     var RENAME_MAX = 32;
     var TAP_GUARD_MS = 350; // 拖拽后吞掉紧随 click 的时间窗
     var NOTICE_MS = 4000;
+    // 固定到侧栏的分区上限：panelList 是 flex:none，固定再多会把会话列表挤扁。
+    // 到限时给提示，不静默截断（方案 §3.3）。
+    var MAX_PINNED = 5;
+    // 固定行的排序位从 100 起，和宿主（0/10）及本插件入口（20）拉开距离，
+    // 谁往中间插条目都不会和固定行打架。
+    var PIN_ORDER_BASE = 100;
+    var PIN_ID_PREFIX = "snm-pin-";
 
     // ── 文案（单一事实来源：locale/*.json 由 test/locale.test.mjs 校验一致性）──
     var DICT = {
@@ -127,6 +142,16 @@ window.__ModuleLoader__.load({
         entryFailed: "侧栏入口切换失败，请稍后重试",
         entryOffBanner: "左侧插件栏入口已隐藏",
         entryRestore: "恢复入口",
+        pin: "固定到侧栏",
+        unpin: "取消固定",
+        pinState: "已固定到侧栏",
+        pinLimit: "侧栏最多固定 5 个分区，先取消一个再试",
+        pinHiddenBlocked: "已隐藏的分区不能固定到侧栏",
+        pinRowHint: "固定到侧栏的分区，点一下直接打开对应设置",
+        pinPageTitle: "该分区已在设置中打开",
+        pinPageBack: "返回设置导航",
+        pinPageOpen: "再次打开设置",
+        pinFailed: "侧栏固定项切换失败，请稍后重试",
       },
       en: {
         gear: "Edit navigation",
@@ -160,6 +185,16 @@ window.__ModuleLoader__.load({
         entryFailed: "Could not toggle the sidebar entry — try again",
         entryOffBanner: "Sidebar entry is hidden",
         entryRestore: "Restore entry",
+        pin: "Pin to sidebar",
+        unpin: "Unpin",
+        pinState: "Pinned to sidebar",
+        pinLimit: "Up to 5 pinned sections — unpin one first",
+        pinHiddenBlocked: "Hidden sections cannot be pinned",
+        pinRowHint: "Pinned sections open their settings in one click",
+        pinPageTitle: "This section is open in settings",
+        pinPageBack: "Back to settings navigation",
+        pinPageOpen: "Open settings again",
+        pinFailed: "Could not toggle the pinned row — try again",
       },
     };
 
@@ -201,6 +236,7 @@ window.__ModuleLoader__.load({
         }),
         hidden: s.hidden.slice(),
         hideEntry: s.hideEntry === true,
+        pinned: s.pinned ? s.pinned.slice() : [],
       };
     }
     function findGroup(state, id) {
@@ -329,6 +365,56 @@ window.__ModuleLoader__.load({
       return chars[0] || "?";
     }
 
+    // ── 固定到侧栏（纯函数）──────────────────────────────────────
+    // 有效固定项：去重 → 去掉隐藏项 → （known 非空时）只留已知分区。
+    // known 为空原样返回，理由同 normalizeState：分区还没注册完不能当非法。
+    function pinnedIds(state, known) {
+      var out = [];
+      if (!state || !Array.isArray(state.pinned)) return out;
+      var knownEmpty = !known || countKeys(known) === 0;
+      var hidden = dict();
+      var seen = dict();
+      var i;
+      for (i = 0; i < state.hidden.length; i++) hidden[state.hidden[i]] = 1;
+      for (i = 0; i < state.pinned.length; i++) {
+        var id = state.pinned[i];
+        if (!isStr(id) || !id || own(seen, id) || own(hidden, id)) continue;
+        if (!knownEmpty && !own(known, id)) continue;
+        seen[id] = 1;
+        out.push(id);
+      }
+      return out;
+    }
+
+    // 切换固定态（纯函数）：返回 { state, reason }，state 是**新对象**（不就地改）
+    // reason: "pinned" | "unpinned" | "limit" | "hidden" | "unknown" | "same"
+    function togglePinnedState(state, id, known) {
+      var next = cloneState(state);
+      var cur = pinnedIds(next, known);
+      var at = cur.indexOf(id);
+      if (at >= 0) {
+        next.pinned = cur.slice();
+        next.pinned.splice(at, 1);
+        return { state: next, reason: "unpinned" };
+      }
+      if (!isStr(id) || !id) return { state: state, reason: "unknown" };
+      for (var h = 0; h < next.hidden.length; h++) {
+        if (next.hidden[h] === id) return { state: state, reason: "hidden" };
+      }
+      if (known && countKeys(known) > 0 && !own(known, id)) return { state: state, reason: "unknown" };
+      if (cur.length >= MAX_PINNED) return { state: state, reason: "limit" };
+      next.pinned = cur.concat([id]);
+      return { state: next, reason: "pinned" };
+    }
+
+    // 固定行的 label：登记时只记 id，取名字实时查，改名/换语言不用重建注册
+    function labelOf(sections, id) {
+      for (var i = 0; i < sections.length; i++) {
+        if (sections[i].id === id) return sections[i].label || id;
+      }
+      return id;
+    }
+
     // ── 持久化态：读取归一化（纯函数，异常输入一律回退默认）─────────
     function createState(raw) {
       var v = raw && typeof raw === "object" ? raw : {};
@@ -352,6 +438,8 @@ window.__ModuleLoader__.load({
         hidden: Array.isArray(v.hidden) ? v.hidden.filter(isStr) : [],
         // 旧版本没有这个字段：缺省 = 显示，绝不把老用户入口藏掉
         hideEntry: v.hideEntry === true,
+        // 阶段 2：固定到侧栏的分区 id（旧数据没有 → 空数组）
+        pinned: Array.isArray(v.pinned) ? v.pinned.filter(isStr) : [],
       };
     }
 
@@ -425,6 +513,17 @@ window.__ModuleLoader__.load({
         seenHidden[id2] = 1;
         return true;
       });
+
+      // 5) 固定到侧栏的表：去重 + 去掉已被隐藏的分区（隐藏项不能留在侧栏上），
+      //    但**不**因为「此刻没见到这个分区」就丢 —— 与 order 同策略，
+      //    真正的非法 id 留到写盘前的 serializeState 过滤。
+      var seenPin = dict();
+      next.pinned = next.pinned.filter(function (id3) {
+        if (own(seenPin, id3)) return false;
+        if (own(seenHidden, id3)) return false; // 隐藏即自动取消固定（方案 §3.3）
+        seenPin[id3] = 1;
+        return true;
+      });
       return next;
     }
 
@@ -450,6 +549,10 @@ window.__ModuleLoader__.load({
         }),
         // 布尔开关：跟着写盘走，但不受 known id 域影响
         hideEntry: state.hideEntry === true,
+        // 固定项：按已知分区过滤（插件卸载后的残留 id 不进盘）
+        pinned: (state.pinned || []).filter(function (id) {
+          return own(known, id);
+        }),
       };
     }
 
@@ -651,11 +754,20 @@ window.__ModuleLoader__.load({
         "[data-snm-page-hint]{margin:0 0 16px;font-size:12px;line-height:1.4;",
         "  color:var(--dsw-alias-label-secondary,#888);}",
         "[data-snm-page-list]{display:flex;flex-direction:column;gap:4px;max-width:640px;}",
-        "[data-snm-page-row]{display:flex;align-items:center;gap:10px;width:100%;box-sizing:border-box;",
+        "[data-snm-page-item]{display:flex;align-items:center;gap:4px;min-width:0;}",
+        "[data-snm-page-row]{display:flex;align-items:center;gap:10px;flex:1 1 auto;min-width:0;box-sizing:border-box;",
         "  min-height:36px;padding:7px 12px;border:1px solid transparent;border-radius:8px;",
         "  background:transparent;color:inherit;font:inherit;font-size:14px;text-align:left;cursor:pointer;}",
         "[data-snm-page-row]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.08));}",
         "[data-snm-page-row]:focus-visible{outline:2px solid var(--dsw-alias-accent,#247bbf);outline-offset:1px;}",
+        "[data-snm-page-pin]{flex:none;margin:0;width:32px;height:32px;display:inline-flex;align-items:center;",
+        "  justify-content:center;border:1px solid transparent;border-radius:8px;background:transparent;",
+        "  color:var(--dsw-alias-label-secondary,#888);font-size:15px;line-height:1;cursor:pointer;}",
+        "[data-snm-page-pin]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.08));",
+        "  color:var(--dsw-alias-label-primary,inherit);}",
+        '[data-snm-page-pin][data-snm-page-pin-state="1"]{color:var(--dsw-alias-accent,#247bbf);}',
+        "[data-snm-page-pin]:focus-visible{outline:2px solid var(--dsw-alias-accent,#247bbf);outline-offset:1px;}",
+        "[data-snm-page-pin]:disabled{opacity:.35;cursor:default;}",
         "[data-snm-page-glyph]{flex:none;width:22px;height:22px;border-radius:50%;display:inline-flex;",
         "  align-items:center;justify-content:center;font-size:12px;line-height:1;",
         "  background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));",
@@ -1020,7 +1132,230 @@ window.__ModuleLoader__.load({
         persist();
       }
 
-      // ── 样式注入 / 清理 ─────────────────────────────────────
+      // ── 固定到侧栏：动态注册行 + 兜底页 + 点击拦截 ────────────
+      // 为什么每个固定行都要配一个同名 main 页：panellist 行的点击最终走
+      // layout.selectPanel(id)，没有同名 main 面板就抛
+      // "main panel ... is not registered"（layout client.js:468）。拦截器挡的是
+      // 常规点击，但布局恢复、深链、键盘激活等路径仍可能走到 selectPanel，
+      // 所以兜底页必须一直在册。
+      var pinDisposers = [];
+      var pinSig = null;
+      var clickHandler = null;
+
+      function disposePins() {
+        while (pinDisposers.length) {
+          var fn = pinDisposers.pop();
+          try {
+            if (typeof fn === "function") fn();
+          } catch (e) {
+            dbg("pin dispose", e);
+          }
+        }
+      }
+
+      function pinLabelOf(sid) {
+        return labelOf(sections, sid);
+      }
+
+      // 侧栏里的固定行图标：面板行会把我们渲染进 .panelRow 按钮内部，
+      // 只能靠 ref 往上找到那一行打标记，拦截器按标记认行（§3.6.3-2）。
+      function makePinGlyph(sid) {
+        return function PinGlyph(props) {
+          var ref = react.useRef(null);
+          react.useEffect(function () {
+            var el = ref.current;
+            if (!el || typeof el.closest !== "function") return undefined;
+            var row =
+              el.closest('button[class*="panelRow"]') ||
+              el.closest("button") ||
+              el.parentElement;
+            if (!row || typeof row.setAttribute !== "function") return undefined;
+            row.setAttribute(DATA.pin, sid);
+            return function () {
+              try {
+                if (row.getAttribute(DATA.pin) === sid) row.removeAttribute(DATA.pin);
+              } catch (e) {
+                dbg("pin unmark", e);
+              }
+            };
+          }, []);
+          var size = props && typeof props.size === "number" && props.size > 0 ? props.size : 16;
+          var label = pinLabelOf(sid);
+          return h(
+            "span",
+            {
+              ref: ref,
+              [DATA.pinIcon]: "1",
+              "aria-hidden": "true",
+              style: {
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: size + "px",
+                height: size + "px",
+                fontSize: Math.max(9, Math.round(size * 0.62)) + "px",
+                lineHeight: "1",
+                fontWeight: "600",
+                opacity: props && props.active ? "1" : "0.85",
+              },
+            },
+            glyphOf(label),
+          );
+        };
+      }
+
+      function makePinPage(sid) {
+        return function PinLandingPage() {
+          var tr =
+            t ||
+            function (key) {
+              return DICT.zh[key] || key;
+            };
+          function back() {
+            // layout 不在 inject 列表里（不想为这个兜底页多加一个服务依赖），
+            // 拿不到就退回「打开设置」——反正这一页只是极端路径的落脚点。
+            try {
+              var dl = ctx.layout;
+              if (dl && typeof dl.selectPanel === "function") {
+                dl.selectPanel(PANEL_ID);
+                return;
+              }
+            } catch (e) {
+              dbg("pin back", e);
+            }
+            openSettingsSection(sid);
+          }
+          return h(
+            "div",
+            { [DATA.page]: "1" },
+            h(
+              "div",
+              { [DATA.pageHead]: "1", "data-window-drag": "true" },
+              h("h2", { [DATA.pageTitle]: "1" }, tr("panel")),
+            ),
+            h("p", { [DATA.pageHint]: "1" }, tr("pinPageTitle")),
+            h("p", { [DATA.pageEmpty]: "1" }, cleanText(pinLabelOf(sid)) || sid),
+            h(
+              "div",
+              { [DATA.pageFoot]: "1" },
+              h(
+                "button",
+                {
+                  key: "open",
+                  type: "button",
+                  onClick: function () {
+                    openSettingsSection(sid);
+                  },
+                },
+                tr("pinPageOpen"),
+              ),
+              h("button", { key: "back", type: "button", onClick: back }, tr("pinPageBack")),
+            ),
+          );
+        };
+      }
+
+      function registerPin(sid, index) {
+        var rowId = PIN_ID_PREFIX + sid;
+        pinDisposers.push(
+          ctx.slots.inject("sidebar.panellist", function () {
+            return ctx.slots.register(
+              {
+                name: "sidebar.panellist",
+                id: rowId,
+                order: PIN_ORDER_BASE + index,
+                locale: NS,
+                label: function () {
+                  return pinLabelOf(sid);
+                },
+              },
+              makePinGlyph(sid),
+            );
+          }),
+        );
+        pinDisposers.push(
+          ctx.slots.inject("main", function () {
+            return ctx.slots.register({ name: "main", key: rowId, locale: NS }, makePinPage(sid));
+          }),
+        );
+      }
+
+      // 固定项集合变了才重建注册：幂等，避免每次 sync 都让侧栏闪一下
+      function rebuildPins() {
+        var ids = pinnedIds(state, knownIdsFrom(sections));
+        var sig = ids.join("\u0001");
+        if (sig === pinSig) return;
+        pinSig = sig;
+        disposePins();
+        for (var i = 0; i < ids.length; i++) {
+          try {
+            registerPin(ids[i], i);
+          } catch (e) {
+            dbg("pin register", e);
+            report("pin", e, "pinFailed");
+          }
+        }
+      }
+
+      function setPinned(id, on) {
+        var next = on === true;
+        var known = knownIdsFrom(sections);
+        var cur = pinnedIds(state, known);
+        if ((cur.indexOf(id) >= 0) === next) return;
+        var res = togglePinnedState(state, id, known);
+        if (res.reason === "limit") {
+          setNotice(t("pinLimit"));
+          return;
+        }
+        if (res.reason === "hidden") {
+          setNotice(t("pinHiddenBlocked"));
+          return;
+        }
+        if (res.reason === "unknown" || res.reason === "same") {
+          setNotice(t("pinFailed"));
+          return;
+        }
+        state = res.state;
+        rebuildPins();
+        publish();
+        persist();
+      }
+
+      // 拦截固定行的点击：document 捕获阶段比 React 挂在 #root 上的委托监听更早，
+      // 这里 preventDefault + stopPropagation 之后 PanelRow 的 onClick 收不到事件，
+      // selectPanel 不会被调用，面板不会切走（§3.6 实证：10/10 通过）。
+      function onPinClickCapture(ev) {
+        if (!ev || disposed) return;
+        var el = ev.target;
+        if (!el || typeof el.closest !== "function") return;
+        var row = el.closest("[" + DATA.pin + "]");
+        if (!row) return;
+        var sid = row.getAttribute(DATA.pin);
+        if (!sid || sid === PANEL_ID) return;
+        if (typeof ev.preventDefault === "function") ev.preventDefault();
+        if (typeof ev.stopPropagation === "function") ev.stopPropagation();
+        var p = openSettingsSection(sid);
+        if (p && typeof p.then === "function") {
+          p.then(function (ok) {
+            if (ok !== true && !disposed) setNotice(t("openFailed"));
+          }, function (e) {
+            dbg("pin open", e);
+            if (!disposed) setNotice(t("openFailed"));
+          });
+        }
+      }
+
+      function bindPinClick() {
+        if (clickHandler || !document) return;
+        clickHandler = onPinClickCapture;
+        document.addEventListener("click", clickHandler, true);
+      }
+      function unbindPinClick() {
+        if (!clickHandler || !document) return;
+        document.removeEventListener("click", clickHandler, true);
+        clickHandler = null;
+      }
+
       function ensureStyles() {
         if (!document || !document.head) return;
         if (styleEl && styleEl.parentNode) return;
@@ -1173,6 +1508,8 @@ window.__ModuleLoader__.load({
         if (sigChanged) publish();
         // 入口显隐跟着 state 走：这里是唯一的注册/注销时机（含启动与恢复默认后）
         syncEntry();
+        // 固定行同理：state/sections 变了就重建（内部幂等，没变不重建）
+        rebuildPins();
         if (!nav) return;
         // 尽力应用：认不全也要把认出来的排好，而不是整体不生效
         applyDom(nav);
@@ -1218,6 +1555,7 @@ window.__ModuleLoader__.load({
           { op: "set", path: ["groups"], value: payload.groups },
           { op: "set", path: ["hidden"], value: payload.hidden },
           { op: "set", path: ["hideEntry"], value: payload.hideEntry === true },
+          { op: "set", path: ["pinned"], value: payload.pinned },
         ];
       }
       function persist() {
@@ -1959,6 +2297,8 @@ window.__ModuleLoader__.load({
         document.addEventListener("keydown", kc, true);
         window.addEventListener("blur", bl);
         document.addEventListener("visibilitychange", bl);
+        // 侧栏固定行的点击拦截独立注册：编辑模式关闭时也要生效
+        bindPinClick();
         cleanups.push(function () {
           document.removeEventListener("pointerdown", pd, true);
           document.removeEventListener("pointermove", pm, true);
@@ -1968,6 +2308,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener("keydown", kc, true);
           window.removeEventListener("blur", bl);
           document.removeEventListener("visibilitychange", bl);
+          unbindPinClick();
         });
       }
 
@@ -2143,30 +2484,61 @@ window.__ModuleLoader__.load({
           visible.push(rows[i]);
         }
         var items = [];
+        var pinnedNow = pinnedIds(state, knownIdsFrom(sections));
         for (var r = 0; r < visible.length; r++) {
           var row = visible[r];
+          var isPinned = pinnedNow.indexOf(row.id) >= 0;
+          // 行 = 容器 + 两个按钮：左边「打开设置分区」，右边「固定/取消固定到侧栏」。
+          // 拆成两个按钮而不是套一个按钮，避免 button 嵌套（HTML 非法、点击语义混乱）。
           items.push(
             h(
-              "button",
+              "div",
               {
                 key: row.id,
-                type: "button",
-                [DATA.pageRow]: "1",
-                [DATA.pageId]: row.id,
+                [DATA.pageItem]: "1",
                 [DATA.pageHidden]: row.hidden ? "1" : "0",
-                [DATA.pageBusy]: opening === row.id ? "1" : "0",
-                "aria-busy": opening === row.id ? "true" : "false",
-                "aria-current": failed === row.id ? "true" : "false",
-                onClick: (function (id) {
-                  return function () {
-                    go(id);
-                  };
-                })(row.id),
               },
-              h("span", { key: "g", [DATA.pageGlyph]: "1", "aria-hidden": "true" }, glyphOf(row.label)),
-              h("span", { key: "l", [DATA.pageLabel]: "1" }, cleanText(row.label) || row.id),
-              row.group ? h("span", { key: "gr", [DATA.pageGroup]: "1" }, cleanText(row.group)) : null,
-              row.hidden ? h("span", { key: "b", [DATA.pageBadge]: "1" }, tr("hidden")) : null,
+              h(
+                "button",
+                {
+                  type: "button",
+                  [DATA.pageRow]: "1",
+                  [DATA.pageId]: row.id,
+                  [DATA.pageHidden]: row.hidden ? "1" : "0",
+                  [DATA.pageBusy]: opening === row.id ? "1" : "0",
+                  "aria-busy": opening === row.id ? "true" : "false",
+                  "aria-current": failed === row.id ? "true" : "false",
+                  onClick: (function (id) {
+                    return function () {
+                      go(id);
+                    };
+                  })(row.id),
+                },
+                h("span", { key: "g", [DATA.pageGlyph]: "1", "aria-hidden": "true" }, glyphOf(row.label)),
+                h("span", { key: "l", [DATA.pageLabel]: "1" }, cleanText(row.label) || row.id),
+                row.group ? h("span", { key: "gr", [DATA.pageGroup]: "1" }, cleanText(row.group)) : null,
+                row.hidden ? h("span", { key: "b", [DATA.pageBadge]: "1" }, tr("hidden")) : null,
+              ),
+              h(
+                "button",
+                {
+                  type: "button",
+                  [DATA.pagePin]: "1",
+                  [DATA.pagePinState]: isPinned ? "1" : "0",
+                  "aria-pressed": isPinned ? "true" : "false",
+                  "aria-label": isPinned ? tr("unpin") : tr("pin"),
+                  title: isPinned ? tr("unpin") : tr("pin"),
+                  // 隐藏的分区不允许固定：入口藏在设置里，用户找不到也关不掉
+                  disabled: row.hidden ? true : undefined,
+                  onClick: (function (id, on) {
+                    return function (ev) {
+                      if (ev && typeof ev.preventDefault === "function") ev.preventDefault();
+                      setPinned(id, on);
+                    };
+                  })(row.id, !isPinned),
+                },
+                isPinned ? "★" : "☆",
+              ),
             ),
           );
         }
@@ -2445,6 +2817,8 @@ window.__ModuleLoader__.load({
           disposed = true;
           if (rafId && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
           rafId = 0;
+          disposePins(); // 固定行是动态注册的，得自己摘
+          unbindPinClick();
           disposeEntry(); // 侧栏入口是动态注册的，得自己摘
           clearTimers(); // 轮询/重试的定时器全部作废
           if (noticeTimer) clearTimeout(noticeTimer);
@@ -2513,6 +2887,12 @@ window.__ModuleLoader__.load({
       flattenNav: flattenNav,
       sectionsSignature: sectionsSignature,
       glyphOf: glyphOf,
+      pinnedIds: pinnedIds,
+      togglePinnedState: togglePinnedState,
+      labelOf: labelOf,
+      MAX_PINNED: MAX_PINNED,
+      PIN_ORDER_BASE: PIN_ORDER_BASE,
+      PIN_ID_PREFIX: PIN_ID_PREFIX,
       isMissingEntry: isMissingEntry,
       looksLikeOurs: looksLikeOurs,
       looksLikeOurValue: looksLikeOurValue,

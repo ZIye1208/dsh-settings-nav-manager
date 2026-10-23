@@ -33,5 +33,15 @@
   "entryHideHint": "重新显示左侧插件栏的「设置导航」入口",
   "entryFailed": "侧栏入口切换失败，请稍后重试",
   "entryOffBanner": "左侧插件栏入口已隐藏",
-  "entryRestore": "恢复入口"
+  "entryRestore": "恢复入口",
+  "pin": "固定到侧栏",
+  "unpin": "取消固定",
+  "pinState": "已固定到侧栏",
+  "pinLimit": "侧栏最多固定 5 个分区，先取消一个再试",
+  "pinHiddenBlocked": "已隐藏的分区不能固定到侧栏",
+  "pinRowHint": "固定到侧栏的分区，点一下直接打开对应设置",
+  "pinPageTitle": "该分区已在设置中打开",
+  "pinPageBack": "返回设置导航",
+  "pinPageOpen": "再次打开设置",
+  "pinFailed": "侧栏固定项切换失败，请稍后重试"
 }
