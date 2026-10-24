@@ -14,3 +14,7 @@ assets/preview-*.png
 
 # npm publish 用的本地缓存目录
 .npm-cache/
+_npmcache/
+
+# 发版用的临时笔记
+_rel*.md

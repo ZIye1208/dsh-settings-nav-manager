@@ -70,8 +70,13 @@ test("P0 回归：分区未知时 normalize 不得裁剪已保存状态", () => 
   assert.deepEqual(out.hidden, ["plugins"], "隐藏项被清空了");
 });
 
-test("P0 回归：分区未知时 serialize 拒写（返回 null）", () => {
-  assert.equal(T.serializeState(T.createState(SAVED), {}), null);
+test("P0 回归：分区未知时 serialize 照样完整写出（不按 known 裁剪）", () => {
+  // 1.4.4 起写盘不再依赖 known：known 只是「此刻的投影」，某个插件临时缺席
+  // 不代表用户的数据该被删掉（审查 D-1）。
+  const payload = T.serializeState(T.createState(SAVED));
+  assert.deepEqual(payload.order, SAVED.order);
+  assert.deepEqual(payload.hidden, ["plugins"]);
+  assert.deepEqual(payload.groups[0].items, ["account"]);
 });
 
 test("normalize：去重 + 把新分区追加到末尾", () => {
@@ -110,10 +115,11 @@ test("P0 同类隐患：只见到部分分区时，不得删掉尚未注册的�
   assert.deepEqual(out.groups[0].items, ["plugins"], "未见到的抽屉成员被误删了");
   assert.deepEqual(out.hidden, ["plugins"], "未见到的隐藏项被误删了");
 
-  // 而写盘时仍然只保留「此刻确实存在」的 id，已卸载插件的痕迹不会永久留存
-  const payload = T.serializeState(out, KNOWN);
+  // 写盘时也不再按「此刻存在」裁剪：数据只增不减（审查 D-1）
+  const payload = T.serializeState(out);
   assert.deepEqual(payload.order, ["models", "general", "g-1", "account"]);
   assert.deepEqual(payload.groups[0].items, ["plugins"]);
+  assert.ok(payload.order.indexOf("plugins") >= 0 || payload.hidden.indexOf("plugins") >= 0);
 });
 
 test("normalize：不在 order 里的抽屉补到末尾", () => {
@@ -127,20 +133,49 @@ test("normalize：不在 order 里的抽屉补到末尾", () => {
   assert.ok(out.order.indexOf("g-2") > out.order.indexOf("general"));
 });
 
-test("serialize：只写已知 id，抽屉 id 不算脏数据", () => {
-  const payload = T.serializeState(T.createState(SAVED), KNOWN);
+test("serialize：保留全部条目（含暂时缺席的分区），脏值只做类型清洗", () => {
+  const payload = T.serializeState(T.createState(SAVED));
   assert.deepEqual(payload.order, ["general", "g-1", "models"]);
   assert.deepEqual(payload.groups[0].items, ["account"]);
   assert.deepEqual(payload.hidden, ["plugins"]);
 
-  // 未知 id 一律被写前过滤掉
+  // 非字符串 / 空串被清掉，但「此刻没注册」的 id 必须留下
   const dirty = T.serializeState(
-    T.createState({ order: ["general", "ghost"], groups: [{ id: "g-1", items: ["ghost"] }], hidden: ["ghost"] }),
-    KNOWN,
+    T.createState({
+      order: ["general", "ghost", null, "", 42],
+      groups: [{ id: "g-1", items: ["ghost", "", null] }],
+      hidden: ["ghost", 7],
+    }),
   );
-  assert.deepEqual(dirty.order, ["general"]);
-  assert.deepEqual(dirty.groups[0].items, []);
-  assert.deepEqual(dirty.hidden, []);
+  assert.deepEqual(dirty.order, ["general", "ghost"]);
+  assert.deepEqual(dirty.groups[0].items, ["ghost"]);
+  assert.deepEqual(dirty.hidden, ["ghost"]);
+});
+
+test("serialize：读路径上限（手工写坏的 settings 不能把界面撑爆）", () => {
+  const many = [];
+  for (let i = 0; i < 500; i++) many.push("id-" + i);
+  const st = T.createState({
+    order: many,
+    groups: [{ id: "g-1", name: "x".repeat(200), items: many }],
+    hidden: many,
+    pinned: many,
+  });
+  const payload = T.serializeState(st);
+  assert.equal(payload.order.length, 200, "order 没有截到上限");
+  assert.equal(payload.hidden.length, 200, "hidden 没有截到上限");
+  assert.equal(payload.groups[0].items.length, 100, "抽屉成员没有截到上限");
+  assert.equal(payload.pinned.length, 5, "固定项没有按上限截断");
+  assert.equal(payload.groups[0].name.length, 32, "抽屉名没有按 32 字符截断");
+  assert.equal(payload.order[499], undefined);
+  assert.deepEqual(payload.order.slice(0, 2), ["id-0", "id-1"]);
+});
+
+test("serialize：抽屉名剔除双向控制符（防 U+202E 视觉欺骗）", () => {
+  const payload = T.serializeState(
+    T.createState({ groups: [{ id: "g-1", name: "a\u202eb\u200b", items: [] }] }),
+  );
+  assert.equal(payload.groups[0].name, "ab");
 });
 
 test("applyDropTo：条目拖进抽屉", () => {
@@ -195,12 +230,13 @@ test("原型键安全：constructor / __proto__ 不能让真实分区被误判",
   assert.deepEqual(out.groups[0].items, ["toString", "models"], "组内成员不该被误删");
   assert.ok(out.hidden.includes("general"), "general 应仍被记为隐藏");
 
-  // 写盘时把非真实分区（含原型键）一律过滤
-  const payload = T.serializeState(out, known);
-  assert.equal(payload.order.indexOf("constructor"), -1);
-  assert.equal(payload.order.indexOf("__proto__"), -1);
-  assert.deepEqual(payload.groups[0].items, ["models"]);
-  assert.deepEqual(payload.hidden, ["general"]);
+  // 写盘不再按 known 过滤（D-1）：原型键这类怪 id 只是字符串，留着不伤渲染，
+  // 关键是「不抛异常、不污染真实分区的判定」。
+  const payload = T.serializeState(out);
+  assert.equal(payload.order.indexOf("general") >= 0, true);
+  assert.deepEqual(payload.groups[0].items, ["toString", "models"]);
+  assert.ok(payload.hidden.indexOf("general") >= 0);
+  assert.ok(payload.hidden.indexOf("constructor") >= 0, "怪 id 留着无害，渲染会跳过");
 });
 
 test("buildCss：关键选择器齐全（升级断链能靠这条守住）", () => {
@@ -440,11 +476,12 @@ test("hideEntry：归一化与写盘都要带上，且不受 known id 域影响"
   const normalized = T.normalizeState(st, known, ["general", "account"]);
   assert.equal(normalized.hideEntry, true, "归一化不能把开关丢了");
 
-  const payload = T.serializeState(normalized, known);
+  const payload = T.serializeState(normalized);
   assert.equal(payload.hideEntry, true);
-  assert.deepEqual(payload.order, ["general", "account"], "未知 id 被过滤，未落位分区按宿主顺序补齐");
-  // known 为空 = 拒绝写入，这条老规则不能被新字段绕过
-  assert.equal(T.serializeState(normalized, {}), null);
+  // 写盘不再按 known 裁剪：ghost 也留着，渲染时会跳过；未落位的 account 补在末尾（D-1）
+  assert.deepEqual(payload.order, ["general", "ghost", "account"]);
+  // hideEntry 是布尔开关，不参与 id 域；它照样写盘
+  assert.equal(payload.hideEntry, true);
 });
 
 test("hideEntry：恢复默认后入口必须重新出现", () => {
@@ -529,9 +566,10 @@ test("固定行的注册契约：id/order 都得让开宿主短名与入口位",
 
 test("pinned 也要进写盘载荷：否则固定行重启就没了", () => {
   const st = T.normalizeState(T.createState({ pinned: ["models", "ghost"] }), KNOWN, ORDER);
-  assert.deepEqual(st.pinned, ["models", "ghost"], "与 order 同策略：没见到的分区先留着，写盘前再清");
-  const payload = T.serializeState(st, KNOWN);
-  assert.deepEqual(payload.pinned, ["models"], "未知分区不落盘");
+  assert.deepEqual(st.pinned, ["models", "ghost"], "与 order 同策略：没见到的分区先留着");
+  const payload = T.serializeState(st);
+  // 1.4.4 起写盘不按 known 裁剪：ghost 也留着，渲染时由 pinnedIds 跳过（D-1）
+  assert.deepEqual(payload.pinned, ["models", "ghost"]);
 });
 
 test("pinned：被隐藏的分区自动取消固定", () => {

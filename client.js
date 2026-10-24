@@ -116,6 +116,9 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
     // 谁往中间插条目都不会和固定行打架。
     var PIN_ORDER_BASE = 100;
     var PIN_ID_PREFIX = "snm-pin-";
+    // describe() 失败的退避重试间隔（毫秒）。读不到盘上内容时不能直接当成空态——
+    // 那会让「一次网关抖动」变成「排版被清空」，所以要重试，而不是放弃。
+    var LOAD_RETRY_DELAYS = [400, 800, 1600];
 
     // ── 文案（单一事实来源：locale/*.json 由 test/locale.test.mjs 校验一致性）──
     var DICT = {
@@ -133,6 +136,8 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         resetDone: "已恢复默认顺序",
         saved: "已保存",
         saveFailed: "未能保存排版，重启后可能丢失",
+        loadFailed: "未能读取已保存的排版，已暂停保存以免覆盖",
+        loadRecovered: "已重新读取排版，保存已恢复",
         recognizeFailed: "导航结构变化，暂未应用整理",
         newGroup: "新抽屉",
         addGroup: "＋ 新建抽屉",
@@ -177,6 +182,8 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         resetDone: "Default order restored",
         saved: "Saved",
         saveFailed: "Layout not saved — it may be lost after restart",
+        loadFailed: "Could not read the saved layout; saving is paused to avoid overwriting it",
+        loadRecovered: "Saved layout re-read; saving resumed",
         recognizeFailed: "Navigation changed; layout not applied yet",
         newGroup: "New drawer",
         addGroup: "+ New drawer",
@@ -538,32 +545,52 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       return next;
     }
 
-    // ── 写前序列化（纯函数）：known 为空时返回 null = 拒绝写入 ──────
-    function serializeState(state, known) {
-      if (countKeys(known) === 0) return null; // 不知道合法 id 域时，宁可不写
+    // ── 写前序列化（纯函数）：只做类型清洗与上限，不按「当前已知分区」裁剪 ──
+    // 1.4.4 起这里不再用 known 过滤（审查 D-1）。known 只是「本次 sync 时刻
+    // 从 ctx.slots.entries("settings.section") 投影出来的快照」：某个插件被禁用、
+    // 正在 HMR 重载、apply 抛错时它就少一项，而写盘时按它裁剪 = 把用户给那个分区
+    // 设的 order / hidden / pinned 永久删掉（重启也找不回来，且没有任何提示）。
+    // 分区本来就是各插件随时注册/卸载的：盘上多留几个暂时不存在的 id 无害
+    // （渲染时本来就会跳过），少一个 id 才是数据丢失 —— 所以这里只增不减。
+    // 真正的「清理失效条目」应该是用户知情的显式动作，不能藏在每次保存里。
+    var LIMIT_ORDER = 200;
+    var LIMIT_GROUPS = 50;
+    var LIMIT_ITEMS = 100;
+    var LIMIT_HIDDEN = 200;
+    var LIMIT_PINNED = MAX_PINNED;
+    var LIMIT_ID = 120;
+    // 字符串 id 列表：去空、去重、截断超长 id，并卡上限（防手工写坏的 settings 撑爆渲染）
+    function idList(src, max) {
+      var out = [];
+      if (!Array.isArray(src)) return out;
+      for (var i = 0; i < src.length && out.length < max; i++) {
+        if (!isStr(src[i]) || !src[i]) continue;
+        var id = src[i].slice(0, LIMIT_ID);
+        if (out.indexOf(id) >= 0) continue;
+        out.push(id);
+      }
+      return out;
+    }
+    function serializeState(state) {
+      var groups = [];
+      var src = state && Array.isArray(state.groups) ? state.groups : [];
+      for (var i = 0; i < src.length && groups.length < LIMIT_GROUPS; i++) {
+        var g = src[i];
+        if (!g || !isStr(g.id) || !g.id) continue;
+        groups.push({
+          id: g.id.slice(0, LIMIT_ID),
+          name: cleanText(g.name).slice(0, RENAME_MAX),
+          collapsed: !!g.collapsed,
+          items: idList(g.items, LIMIT_ITEMS),
+        });
+      }
       return {
-        order: state.order.filter(function (id) {
-          return own(known, id) || isGroupTop(state, id);
-        }),
-        groups: state.groups.map(function (g) {
-          return {
-            id: g.id,
-            name: g.name,
-            collapsed: !!g.collapsed,
-            items: g.items.filter(function (id) {
-              return own(known, id);
-            }),
-          };
-        }),
-        hidden: state.hidden.filter(function (id) {
-          return own(known, id);
-        }),
-        // 布尔开关：跟着写盘走，但不受 known id 域影响
-        hideEntry: state.hideEntry === true,
-        // 固定项：按已知分区过滤（插件卸载后的残留 id 不进盘）
-        pinned: (state.pinned || []).filter(function (id) {
-          return own(known, id);
-        }),
+        order: idList(state && state.order, LIMIT_ORDER),
+        groups: groups,
+        hidden: idList(state && state.hidden, LIMIT_HIDDEN),
+        // 布尔开关：跟着写盘走，不参与 id 域
+        hideEntry: !!(state && state.hideEntry === true),
+        pinned: idList(state && state.pinned, LIMIT_PINNED),
       };
     }
 
@@ -874,6 +901,10 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       // nsResolved=false 表示「describe 明确告诉我们自己的命名空间不存在」——
       // 此时一律不写（失败关闭）。默认 true：describe 尚未返回前保持旧行为。
       var nsResolved = true;
+      // stateKnown=false 表示「还没成功读到盘上的内容」：此时内存态是空的默认值，
+      // 写出去就是静默清档（审查 D-2）。只有 describe 成功返回才置 true。
+      var stateKnown = false;
+      var loadTries = 0;
       var groupSeq = 1;
       var t = null;
       var drag = null;
@@ -1685,15 +1716,20 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         ];
       }
       function persist() {
-        // describe 已确认「自己的命名空间不存在」→ 失败关闭：一个字节都不写。
+        // ① 还没成功读到盘上的内容 → 内存里是空默认值，写出去就是静默清档。
+        if (!stateKnown) {
+          dbg("save", "state unknown: describe 尚未成功，暂不写入");
+          report("save", null, "loadFailed");
+          return Promise.resolve(false);
+        }
+        // ② describe 已确认「自己的命名空间不存在」→ 失败关闭：一个字节都不写。
         // 旧实现会拿默认 NS 无脑往下写，正是靠失败换来的重试把写打到了别人的 ns 上。
         if (!nsResolved) {
           dbg("save", "namespace unresolved: " + NS + " 不在 describe() 里");
           report("save", null, "saveFailed"); // 不把内部 token 甩给用户看
           return Promise.resolve(false);
         }
-        var payload = serializeState(state, knownIdsFrom(sections));
-        if (!payload) return Promise.resolve(false); // 分区未知（面板没开）→ 不写，防覆盖
+        var payload = serializeState(state);
         var ops = payloadOps(payload);
         return writeVia("update", payload).then(function (r1) {
           if (r1.ok) return settleOk(r1.res);
@@ -1811,7 +1847,11 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       function loadState() {
         var rm = remote();
         if (!rm || typeof rm.describe !== "function") {
-          stateLoaded = true; // 没有 describe 也要放行入口，否则侧栏永远是空的
+          // 读不到就无法保证「写出去的不是空态覆盖」：失败关闭（不写），
+          // 但仍放行入口，否则侧栏永远是空的。
+          stateLoaded = true;
+          stateKnown = false;
+          report("load", null, "loadFailed");
           syncEntry();
           return Promise.resolve();
         }
@@ -1827,16 +1867,42 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
             revision = ns && typeof ns.revision === "number" ? ns.revision : undefined;
             updateGroupSeq();
             stateLoaded = true;
+            // 读到了（哪怕是没有值的空文档）才允许写
+            stateKnown = true;
+            loadTries = 0;
+            if (reported.load) {
+              clearReport("load");
+              setNotice(t("loadRecovered"));
+            }
             sync();
           })
           .catch(function (err) {
             dbg("describe", err);
+            // 状态未知：内存态退化成空，但【绝不写盘】。
+            // 旧实现漏了这一步：describe 一失败，随后任意一次眼睛/星标/拖拽
+            // 就会把「全空」当成用户的排版写回去，而且因为写入成功，连报错都没有。
+            stateKnown = false;
             state = createState(null);
             revision = undefined;
             updateGroupSeq();
             stateLoaded = true;
             sync();
+            retryLoad(err);
           });
+      }
+      // describe 失败不等于「盘上没有数据」：按 400/800/1600ms 退避重试，
+      // 期间 stateKnown 一直是 false（persist 的守卫会挡住一切写入）。
+      function retryLoad(cause) {
+        if (disposed) return;
+        if (loadTries >= LOAD_RETRY_DELAYS.length) {
+          report("load", cause, "loadFailed");
+          return;
+        }
+        var wait = LOAD_RETRY_DELAYS[loadTries++];
+        later(function () {
+          if (disposed || stateKnown) return;
+          loadState();
+        }, wait);
       }
       function updateGroupSeq() {
         for (var i = 0; i < state.groups.length; i++) {

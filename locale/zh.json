@@ -15,6 +15,8 @@
   "resetDone": "已恢复默认顺序",
   "saved": "已保存",
   "saveFailed": "未能保存排版，重启后可能丢失",
+  "loadFailed": "未能读取已保存的排版，已暂停保存以免覆盖",
+  "loadRecovered": "已重新读取排版，保存已恢复",
   "recognizeFailed": "导航结构变化，暂未应用整理",
   "newGroup": "新抽屉",
   "addGroup": "＋ 新建抽屉",

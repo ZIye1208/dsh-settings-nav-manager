@@ -63,7 +63,14 @@
     };
     st.decoys = opts.decoys || [];
     st.hideSelf = !!opts.hideSelf;
+    // failDescribe: 让 describe() 连续失败几次（Infinity = 一直失败）。
+    // 用来验证「读不到盘上内容时绝不写盘」（审查 D-2）。
+    st.failDescribe = opts.failDescribe || 0;
     st.describe = function () {
+      if (st.failDescribe === Infinity || st.failDescribe > 0) {
+        if (st.failDescribe !== Infinity) st.failDescribe--;
+        return Promise.reject(new Error("describe failed (simulated)"));
+      }
       var list = [];
       if (!st.hideSelf) {
         var nsName = st.aliasNs || "settings-nav-manager";
@@ -106,6 +113,7 @@
         return Promise.resolve({ ok: false, error: { code: "SETTINGS_CONFLICT", message: "revision mismatch" } });
       }
       st.value = build();
+      st.writes.push({ method: method, ns: ns, value: clone(st.value) });
       st.revision++;
       return Promise.resolve({
         ok: true,
@@ -1545,6 +1553,53 @@
         style.remove();
         resetEnv();
       }
+    },
+  });
+
+  // ── 1.4.4：D-2「读不到就不许写」──────────────────────────────
+  scenarios.push({
+    name: "describe 一直失败：任何操作都不写盘（不拿空态覆盖）",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3, { failDescribe: Infinity });
+      applyFresh();
+      await sleep(120);
+      // 入口照常出现（读不到也不能让用户找不到入口）
+      await openPanel();
+      await enterEditing();
+      var cell = cellBySection("general");
+      clickEye(cell);
+      await sleep(200);
+      clickStar(cellBySection("models"));
+      await sleep(200);
+      assert(env.store.writes.length === 0, "读不到盘上内容却写盘了：" + JSON.stringify(env.store.writes));
+      assert(env.store.value && (env.store.value.hidden || []).indexOf("plugins") >= 0, "磁盘上的旧数据被改动了");
+      var bubble = document.querySelector("[data-snm-bubble]");
+      var notice = document.querySelector("[data-snm-notice]");
+      assert(notice && bubble && bubble.contains(notice), "读失败没有任何提示（用户会以为改动生效了）");
+      return "零写入，提示：" + (notice.textContent || "").slice(0, 12);
+    },
+  });
+
+  scenarios.push({
+    name: "describe 失败后重试成功：旧排版不丢，保存恢复",
+    oldFails: true,
+    run: async function () {
+      // 第一次失败，退避 400ms 后第二次成功（真实网关抖动的形态）
+      env.store = makeStore(SAVED, 3, { failDescribe: 1 });
+      applyFresh();
+      await sleep(700); // 覆盖 400ms 那次重试
+      await openPanel();
+      await enterEditing();
+      var cells = panelCells();
+      assert(cells.length >= 3, "重试成功后行数不对：" + cells.length);
+      clickEye(cellBySection("general"));
+      await sleep(250);
+      assert(env.store.writes.length >= 1, "恢复后仍然写不进盘");
+      var w = env.store.value || {};
+      assert((w.hidden || []).indexOf("plugins") >= 0, "恢复后写盘把旧隐藏项丢了：" + JSON.stringify(w.hidden));
+      assert((w.groups && w.groups[0] && w.groups[0].items || []).indexOf("account") >= 0, "恢复后写盘把抽屉成员丢了");
+      return "写入=" + JSON.stringify(w.hidden) + "，writes=" + env.store.writes.length;
     },
   });
 
