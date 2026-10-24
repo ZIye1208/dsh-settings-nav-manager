@@ -207,7 +207,7 @@ test("buildCss：关键选择器齐全（升级断链能靠这条守住）", () 
   const css = T.buildCss();
   for (const sel of [
     "[data-snm-nav]",
-    "[data-snm-editing=\"1\"] [data-snm-row]::after",
+    "[data-snm-editing=\"1\"] [data-snm-row]::before",
     "[data-snm-editing=\"0\"] [data-snm-row][data-snm-hidden=\"1\"]{display:none;}",
     "[data-snm-row][data-snm-in-group]",
     "[data-snm-add-group]",
@@ -218,17 +218,22 @@ test("buildCss：关键选择器齐全（升级断链能靠这条守住）", () 
   }
 });
 
-test("buildCss：编辑模式星标与眼睛并排（1.4.0 的两段命中区）", () => {
+test("buildCss：星标与眼睛是同一个伪元素的两层遮罩（1.4.1 防竖向错位）", () => {
   const css = T.buildCss();
-  // 星标：::before，右端 7px 起；眼睛：::after 挪到 31px；行内右侧预留 56px
-  assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin]::before'), "缺少星标基础规则");
+  // 两颗图标共用 ::before 的两个 mask 层：位置同源，不可能一高一低
+  assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row]::before'), "缺少图标基础规则");
+  assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin]::before'), "缺少星标层规则");
   assert.ok(
     css.includes('[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin-state="1"]::before'),
     "缺少「已固定」实心态规则",
   );
-  assert.match(css, /\[data-snm-nav-pin\]::before\{[^}]*right:7px/, "星标没放在右端 7px");
-  assert.match(css, /::after\{[^}]*right:31px/, "眼睛没挪到右端 31px");
-  assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row]{padding-right:56px;}'), "行内右侧没预留 56px");
+  assert.match(css, /mask-position:right 7px center,right 29px center/, "两层遮罩位置不对（星标 7px / 眼睛 29px）");
+  assert.match(css, /mask-size:18px 18px,18px 18px/, "两层遮罩尺寸不对");
+  // 上下各 -9px 对称外扩：宿主给某些行换了定位容器时，中心不变
+  assert.match(css, /left:0;right:0;top:-9px;bottom:-9px;/, "图标层没有对称外扩（换容器就会错位）");
+  assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row]{padding-right:48px;}'), "行内右侧没预留 48px");
+  // 旧实现（眼睛独占 ::after）必须已经不在了，否则两层规则会互相覆盖
+  assert.ok(!css.includes('[data-snm-row]::after'), "还残留着眼睛的 ::after 规则");
 });
 
 test("编辑模式文案：说明点到星标/眼睛，且分行", () => {
@@ -238,6 +243,17 @@ test("编辑模式文案：说明点到星标/眼睛，且分行", () => {
   assert.ok(T.DICT.en.editHint.includes("\n"), "英文说明没分行");
   // 不用 emoji：部分字体/终端缺字形会显示成方块（截图上就踩过）
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(T.DICT.zh.editHint), "说明里不该混 emoji 图标");
+});
+
+test("buildCss：说明浮层自动淡出，且不吃点击（1.4.1）", () => {
+  const css = T.buildCss();
+  assert.ok(css.includes("[data-snm-bubble]{pointer-events:none;}"), "浮层没设 pointer-events:none");
+  assert.match(css, /\[data-snm-hint\]\{opacity:0;animation:snm-hint-fade 8s ease-out forwards;\}/, "说明没有 8 秒淡出动画");
+  assert.ok(css.includes("@keyframes snm-hint-fade"), "缺少淡出关键帧");
+  assert.ok(
+    css.includes("[data-snm-gear-wrap]:hover [data-snm-hint]{animation:none;opacity:1;}"),
+    "悬停齿轮后说明不能重新出现",
+  );
 });
 
 test("文案表：中英双语键集合一致", () => {

@@ -1381,6 +1381,31 @@
     },
   });
 
+  scenarios.push({
+    name: "说明浮层：绝对定位，不挤占 header，报错也不推按钮",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var bubble = document.querySelector("[data-snm-bubble]");
+      assert(bubble, "编辑模式没有说明浮层");
+      assert(getComputedStyle(bubble).position === "absolute", "浮层不是绝对定位（会挤占设置内容）");
+      var gear = document.querySelector("[data-snm-gear]");
+      var before = gear.getBoundingClientRect().right;
+      clickStar(cellBySection("plugins")); // SAVED.hidden 里就有 plugins → 触发红字告警
+      await sleep(250);
+      var notice = document.querySelector("[data-snm-notice]");
+      assert(notice, "隐藏分区点星标没有出现告警");
+      assert(notice.closest("[data-snm-bubble]"), "告警没放进浮层（又会挤到齿轮旁边）");
+      // 重渲染会换掉旧节点，必须重新取
+      var gear2 = document.querySelector("[data-snm-gear]");
+      var after = gear2.getBoundingClientRect().right;
+      assert(Math.abs(after - before) < 0.5, "告警把齿轮挤动了：" + before + " → " + after);
+      return "浮层定位正常，齿轮未位移";
+    },
+  });
+
   window.__demo = async function () {
     await resetEnv();
     env.store = makeStore(SAVED, 3);

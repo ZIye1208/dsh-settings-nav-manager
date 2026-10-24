@@ -11,3 +11,6 @@ test/harness/legacy.js
 
 # 测试台渲染的效果图（本地证据，不入库）
 assets/preview-*.png
+
+# npm publish 用的本地缓存目录
+.npm-cache/

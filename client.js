@@ -107,6 +107,7 @@ window.__ModuleLoader__.load({
     var RENAME_MAX = 32;
     var TAP_GUARD_MS = 350; // 拖拽后吞掉紧随 click 的时间窗
     var NOTICE_MS = 4000;
+var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
     // 固定到侧栏的分区上限：panelList 是 flex:none，固定再多会把会话列表挤扁。
     // 到限时给提示，不静默截断（方案 §3.3）。
     var MAX_PINNED = 5;
@@ -671,44 +672,65 @@ window.__ModuleLoader__.load({
       var starPinned = 'url("data:image/svg+xml,' + encodeURIComponent(starOn) + '")';
       var on = 'url("data:image/svg+xml,' + encodeURIComponent(eyeOpen) + '")';
       var off = 'url("data:image/svg+xml,' + encodeURIComponent(eyeOff) + '")';
+      // 空图层：不固定 / 非入口行时占位，保证两个遮罩层的位置固定
+      var blank = 'url("data:image/svg+xml,' + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'></svg>") + '")';
+      // 两颗图标放进同一个 ::before 的两个遮罩层：位置同源，永远齐平。
+      // 纵向用上下各 -9px 的对称外扩锚定「行中心」——即使宿主给某些行换了
+      // 定位容器（有的行没有前置图标），对称外扩不改变中心，不会一高一低。
+      function iconMask(star, eye) {
+        return [
+          "  -webkit-mask-image:" + star + "," + eye + ";",
+          "  -webkit-mask-position:right 7px center,right 29px center;",
+          "  -webkit-mask-size:18px 18px,18px 18px;",
+          "  -webkit-mask-repeat:no-repeat,no-repeat;",
+          "  mask-image:" + star + "," + eye + ";",
+          "  mask-position:right 7px center,right 29px center;",
+          "  mask-size:18px 18px,18px 18px;",
+          "  mask-repeat:no-repeat,no-repeat;",
+        ].join("\n");
+      }
       return [
         // 容器：确保 flex column，order 生效
         "[data-snm-nav]{display:flex;flex-direction:column;}",
         "[data-snm-row]{position:relative;}",
-        // 编辑模式：眼睛（::after，描线 SVG + currentColor 随主题）
-        // 右端 56px 里放两颗 18px 图标：星标 7..25、眼睛 31..49，中间留 6px。
-        '[data-snm-editing="1"] [data-snm-row]::after{',
-        '  content:"";position:absolute;right:31px;top:0;bottom:0;width:18px;',
+        // 说明浮层：只露 8 秒后自己淡出（纯 CSS，不依赖组件状态），
+        // 鼠标移到齿轮区随时再看。pointer-events:none 保证它绝不挡点击。
+        "[data-snm-bubble]{pointer-events:none;}",
+        "[data-snm-hint]{opacity:0;animation:snm-hint-fade " + HINT_MS / 1000 + "s ease-out forwards;}",
+        "[data-snm-gear-wrap]:hover [data-snm-hint]{animation:none;opacity:1;}",
+        "@keyframes snm-hint-fade{0%{opacity:1}80%{opacity:1}100%{opacity:0;}}",
+        // 编辑模式：右端两颗图标（眼睛 + 星标），同一个伪元素的两个遮罩层。
+        // 保留位：星标 7..25、眼睛 29..47，中间 4px；行右 padding 48px。
+        '[data-snm-editing="1"] [data-snm-row]::before{',
+        '  content:"";position:absolute;left:0;right:0;top:-9px;bottom:-9px;',
         "  background-color:currentColor;opacity:.72;pointer-events:none;",
-        "  -webkit-mask:" + on + " center/contain no-repeat;",
-        "  mask:" + on + " center/contain no-repeat;",
+        iconMask(blank, on),
         "}",
-        // 编辑模式：星标（::before，固定到侧栏）。空心=未固定，实心=已固定
+        // 星标只打在有 data-snm-nav-pin 的行上；空心=未固定，实心=已固定
         '[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin]::before{',
-        '  content:"";position:absolute;right:7px;top:0;bottom:0;width:18px;',
-        "  background-color:currentColor;opacity:.5;pointer-events:none;",
-        "  -webkit-mask:" + starIdle + " center/contain no-repeat;",
-        "  mask:" + starIdle + " center/contain no-repeat;",
+        iconMask(starIdle, on),
         "}",
         '[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin-state="1"]::before{',
-        "  -webkit-mask:" + starPinned + " center/contain no-repeat;",
-        "  mask:" + starPinned + " center/contain no-repeat;",
+        iconMask(starPinned, on),
         "  opacity:.95;",
         "}",
-        // 已隐藏的分区不能固定：星标压暗，点了只给提示（JS 侧拦）
-        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"]::before{opacity:.22;}',
-        // 隐藏：换「划线眼」，眼睛常驻（保留可见、可点回）
-        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"]::after{',
-        "  -webkit-mask:" + off + " center/contain no-repeat;",
-        "  mask:" + off + " center/contain no-repeat;",
-        "  opacity:.9;",
+        // 已隐藏的分区不能固定：整对图标压暗（点了只给提示，JS 侧拦）
+        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"]::before{',
+        iconMask(blank, off),
+        "  opacity:.5;",
         "}",
-        // 隐藏：只置灰内容，眼睛保持亮
+        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"][data-snm-nav-pin]::before{',
+        iconMask(starIdle, off),
+        "}",
+        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"][data-snm-nav-pin-state="1"]::before{',
+        iconMask(starPinned, off),
+        "}",
+        // 隐藏：只置灰内容，图标保持可见、可点回
         '[data-snm-row][data-snm-hidden="1"] [class*="navLabel"],',
         '[data-snm-row][data-snm-hidden="1"] [class*="navIcon"]{opacity:.42;}',
         '[data-snm-editing="0"] [data-snm-row][data-snm-hidden="1"]{display:none;}',
         // 编辑模式：预留两颗图标位 + 标签截断
-        '[data-snm-editing="1"] [data-snm-row]{padding-right:56px;}',
+        '[data-snm-editing="1"] [data-snm-row]{padding-right:48px;}',
         '[data-snm-editing="1"] [class*="navLabel"]{',
         "  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
         "  min-width:0;flex:1 1 auto;",
@@ -2766,38 +2788,65 @@ window.__ModuleLoader__.load({
               entryLabel + " " + entryStateText,
             )
           : null;
-        var hint = editing
-          ? h(
-              "span",
+        // 说明与告警做成「浮层气泡」：绝对定位在齿轮左侧，不参与 header 的 flex 排版，
+        // 既不会挤占设置内容，也不会因为红字变长把齿轮推到一边。
+        var bubbleRows = [];
+        if (notice) {
+          bubbleRows.push(
+            h(
+              "div",
               {
-                "data-snm-hint": "1",
-                title: t ? t("keyboardHint") : DICT.zh.keyboardHint,
-                style: {
-                  fontSize: "12px",
-                  lineHeight: "1.35",
-                  color: "var(--dsw-alias-label-secondary,#888)",
-                  whiteSpace: "pre-line",
-                  maxWidth: "360px",
-                  textAlign: "left",
-                },
-              },
-              t ? t("editHint") : DICT.zh.editHint,
-            )
-          : null;
-        var noticeEl = notice
-          ? h(
-              "span",
-              {
+                key: "notice",
                 "data-snm-notice": "1",
                 role: "status",
-                style: {
-                  fontSize: "12px",
-                  lineHeight: "1.3",
-                  color: "var(--dsw-alias-state-error-primary,#c33)",
-                  whiteSpace: "nowrap",
-                },
+                style: { color: "var(--dsw-alias-state-error-primary,#e06c6c)", whiteSpace: "pre-line" },
               },
               notice,
+            ),
+          );
+        }
+        if (editing) {
+          bubbleRows.push(
+            h(
+              "div",
+              {
+                key: "hint",
+                "data-snm-hint": "1",
+                title: t ? t("keyboardHint") : DICT.zh.keyboardHint,
+                style: { color: "var(--dsw-alias-label-secondary,#9aa0a6)", whiteSpace: "pre-line" },
+              },
+              t ? t("editHint") : DICT.zh.editHint,
+            ),
+          );
+        }
+        var bubble = bubbleRows.length
+          ? h(
+              "div",
+              {
+                "data-snm-bubble": "1",
+                style: {
+                  position: "absolute",
+                  right: "calc(100% + 10px)",
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  zIndex: 30,
+                  width: "298px",
+                  maxWidth: "42vw",
+                  padding: "9px 11px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "6px",
+                  borderRadius: "8px",
+                  fontSize: "12px",
+                  lineHeight: "1.45",
+                  textAlign: "left",
+                  background: "var(--dsw-alias-bg-layer-2,#23252b)",
+                  border: "1px solid var(--dsw-alias-border,rgba(128,128,128,.3))",
+                  boxShadow: "var(--dsw-elevation-prominent,0 8px 24px rgba(0,0,0,.4))",
+                  pointerEvents: "none",
+                },
+              },
+              bubbleRows,
             )
           : null;
         var live = h("span", { "data-snm-sr": "1", role: "status", "aria-live": "polite" }, notice || "");
@@ -2811,10 +2860,10 @@ window.__ModuleLoader__.load({
               gap: "8px",
               minWidth: 0,
               marginLeft: "6px",
+              position: "relative",
             },
           },
-          hint,
-          noticeEl,
+          bubble,
           live,
           gearBtn,
           entryBtn,
