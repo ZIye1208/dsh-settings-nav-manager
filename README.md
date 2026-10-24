@@ -8,7 +8,15 @@
 
 ## 产品演示
 
+### 总览：编辑模式 · 拖拽排序 · 显隐 · 抽屉收纳
+
+![产品演示：进入编辑模式、拖拽排序、眼睛显隐、抽屉收纳](https://raw.githubusercontent.com/ZIye1208/dsh-settings-nav-manager/main/assets/demo.gif)
+
+### 1.3.0 新增：分区固定到侧栏
+
 ![1.3.0 新版演示：入口页点 ☆ 固定分区，侧栏插件栏立刻多一行，点一下直接打开对应设置，主面板不切走](https://raw.githubusercontent.com/ZIye1208/dsh-settings-nav-manager/main/assets/demo-1.3.gif)
+
+上图是 1.0 – 1.2 的整理能力，下图是 1.3.0 新增的「固定到侧栏」。
 
 ### 🆕 1.3.0 更新的功能
 
@@ -18,13 +26,6 @@
 | **兜底页** | 每个固定行都配一个同名 `main` 页。哪怕布局恢复 / 深链 / 键盘激活绕过了点击拦截，也不会抛 `layout.selectPanel: panel "..." is not registered`，而是看到一个有「打开设置 / 返回」的页。 |
 | **隐藏即取消固定** | 已隐藏的分区不能钉（☆ 置灰）；反过来，隐藏一个已钉的分区会自动取消它的固定——入口藏在设置里，钉着也点不到。 |
 | **语言无关** | 固定行的标题走实时解析，切到英文界面后标签跟着变，不需要重建注册。 |
-
-<details>
-<summary>总览演示：编辑模式 · 拖拽排序 · 显隐 · 抽屉收纳</summary>
-
-![产品演示：进入编辑模式、拖拽排序、眼睛显隐、抽屉收纳](https://raw.githubusercontent.com/ZIye1208/dsh-settings-nav-manager/main/assets/demo.gif)
-
-</details>
 
 ---
 
@@ -223,7 +224,6 @@ dsh-settings-nav-manager/
 ├── icon.svg           # 插件图标
 ├── assets/            # demo-1.3.gif（分区固定演示）/ demo.gif（总览演示）
 ├── tools/gen-locale.mjs
-├── docs/              # 方案文档（侧栏快捷入口的分阶段设计）
 └── test/              # unit / repo / e2e（含 harness）
 ```
 
