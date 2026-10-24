@@ -93,9 +93,16 @@ window.__ModuleLoader__.load({
       // 打在侧栏真实行按钮上的标记；点击拦截器按它认行（§3.6.3 约束 2）
       pin: "data-snm-pin",
       pinIcon: "data-snm-pin-icon",
+      // 编辑模式下导航行自带的星标（和侧栏固定行是两个不同的东西，
+      // 属性必须与 DATA.pin 区分开，否则会被侧栏点击拦截器认成固定行）
+      navPin: "data-snm-nav-pin",
+      navPinState: "data-snm-nav-pin-state",
     };
 
-    var ZONE_EYE = 40; // 命中眼睛分区（相对行右侧，px）
+    // 行右侧的两段命中区（距行右边缘的像素）：0..ZONE_STAR 星标，ZONE_STAR..ZONE_EYE 眼睛。
+    // ZONE_EYE 也是「不启动拖拽」的门槛——两个按钮都不该触发拖拽。
+    var ZONE_STAR = 26;
+    var ZONE_EYE = 50;
     var DRAG_THRESHOLD = 6; // >6px 判拖拽，低于阈值放行普通点击
     var RENAME_MAX = 32;
     var TAP_GUARD_MS = 350; // 拖拽后吞掉紧随 click 的时间窗
@@ -113,7 +120,8 @@ window.__ModuleLoader__.load({
       zh: {
         gear: "编辑导航",
         gearExit: "退出编辑导航",
-        editHint: "拖拽排序 · 点眼睛隐藏 · 双击改名 · 可收纳 · 齿轮旁开关控制侧栏入口",
+        editHint:
+          "拖拽排序 · 行右端：眼睛显隐、星标固定到侧栏\n双击抽屉名改名 · 底部「＋ 新建抽屉」分组收纳\n齿轮旁开关控制侧栏入口显隐",
         keyboardHint: "Alt+↑/↓ 排序 · h 显隐 · Enter 折叠 · F2 改名",
         hidden: "已隐藏",
         show: "显示",
@@ -156,7 +164,8 @@ window.__ModuleLoader__.load({
       en: {
         gear: "Edit navigation",
         gearExit: "Exit navigation editing",
-        editHint: "Drag to reorder · Eye hides · Double-click renames · Drawers collect · Switch by the gear hides the sidebar entry",
+        editHint:
+          "Drag to reorder · row end: eye hides, star pins to the sidebar\nDouble-click a drawer name to rename · “+ New drawer” groups items\nThe switch by the gear shows/hides the sidebar entry",
         keyboardHint: "Alt+↑/↓ reorder · h hide · Enter collapse · F2 rename",
         hidden: "Hidden",
         show: "Show",
@@ -654,6 +663,12 @@ window.__ModuleLoader__.load({
         "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z'/><circle cx='12' cy='12' r='2.5'/></svg>";
       var eyeOff =
         "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z'/><circle cx='12' cy='12' r='2.5'/><line x1='3.5' y1='3.5' x2='20.5' y2='20.5'/></svg>";
+      var starOff =
+        "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.13l-5.3 2.78 1.01-5.9L3.42 9.83l5.93-.86z'/></svg>";
+      var starOn =
+        "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='black' stroke='black' stroke-width='1.6' stroke-linejoin='round'><path d='M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.13l-5.3 2.78 1.01-5.9L3.42 9.83l5.93-.86z'/></svg>";
+      var starIdle = 'url("data:image/svg+xml,' + encodeURIComponent(starOff) + '")';
+      var starPinned = 'url("data:image/svg+xml,' + encodeURIComponent(starOn) + '")';
       var on = 'url("data:image/svg+xml,' + encodeURIComponent(eyeOpen) + '")';
       var off = 'url("data:image/svg+xml,' + encodeURIComponent(eyeOff) + '")';
       return [
@@ -661,12 +676,27 @@ window.__ModuleLoader__.load({
         "[data-snm-nav]{display:flex;flex-direction:column;}",
         "[data-snm-row]{position:relative;}",
         // 编辑模式：眼睛（::after，描线 SVG + currentColor 随主题）
+        // 右端 56px 里放两颗 18px 图标：星标 7..25、眼睛 31..49，中间留 6px。
         '[data-snm-editing="1"] [data-snm-row]::after{',
-        '  content:"";position:absolute;right:20px;top:0;bottom:0;width:18px;',
+        '  content:"";position:absolute;right:31px;top:0;bottom:0;width:18px;',
         "  background-color:currentColor;opacity:.72;pointer-events:none;",
         "  -webkit-mask:" + on + " center/contain no-repeat;",
         "  mask:" + on + " center/contain no-repeat;",
         "}",
+        // 编辑模式：星标（::before，固定到侧栏）。空心=未固定，实心=已固定
+        '[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin]::before{',
+        '  content:"";position:absolute;right:7px;top:0;bottom:0;width:18px;',
+        "  background-color:currentColor;opacity:.5;pointer-events:none;",
+        "  -webkit-mask:" + starIdle + " center/contain no-repeat;",
+        "  mask:" + starIdle + " center/contain no-repeat;",
+        "}",
+        '[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin-state="1"]::before{',
+        "  -webkit-mask:" + starPinned + " center/contain no-repeat;",
+        "  mask:" + starPinned + " center/contain no-repeat;",
+        "  opacity:.95;",
+        "}",
+        // 已隐藏的分区不能固定：星标压暗，点了只给提示（JS 侧拦）
+        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"]::before{opacity:.22;}',
         // 隐藏：换「划线眼」，眼睛常驻（保留可见、可点回）
         '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"]::after{',
         "  -webkit-mask:" + off + " center/contain no-repeat;",
@@ -677,8 +707,8 @@ window.__ModuleLoader__.load({
         '[data-snm-row][data-snm-hidden="1"] [class*="navLabel"],',
         '[data-snm-row][data-snm-hidden="1"] [class*="navIcon"]{opacity:.42;}',
         '[data-snm-editing="0"] [data-snm-row][data-snm-hidden="1"]{display:none;}',
-        // 编辑模式：预留眼睛位 + 标签截断
-        '[data-snm-editing="1"] [data-snm-row]{padding-right:52px;}',
+        // 编辑模式：预留两颗图标位 + 标签截断
+        '[data-snm-editing="1"] [data-snm-row]{padding-right:56px;}',
         '[data-snm-editing="1"] [class*="navLabel"]{',
         "  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
         "  min-width:0;flex:1 1 auto;",
@@ -1318,6 +1348,7 @@ window.__ModuleLoader__.load({
         state = res.state;
         rebuildPins();
         publish();
+        sync(); // 导航行上的星标（空心/实心）跟着变；入口页也吃同一份 state
         persist();
       }
 
@@ -1486,8 +1517,20 @@ window.__ModuleLoader__.load({
             else cell.removeAttribute(DATA.hidden);
           }
         }
+        // 星标状态：固定集合落到行上，CSS 靠它决定空心/实心
+        var pinSet = dict();
+        var pinList = pinnedIds(state, knownIdsFrom(sections));
+        for (var pi = 0; pi < pinList.length; pi++) pinSet[pinList[pi]] = 1;
         for (var bi = 0; bi < cells.length; bi++) {
           if (!cells[bi].style.order) cells[bi].style.order = String(1000 + bi);
+          var bid = cells[bi].getAttribute(DATA.id);
+          if (!bid) {
+            cells[bi].removeAttribute(DATA.navPin);
+            cells[bi].removeAttribute(DATA.navPinState);
+            continue;
+          }
+          cells[bi].setAttribute(DATA.navPin, "1");
+          cells[bi].setAttribute(DATA.navPinState, own(pinSet, bid) ? "1" : "0");
         }
         buildTail(nav, counter);
       }
@@ -2209,7 +2252,22 @@ window.__ModuleLoader__.load({
         var row = closestRow(e.target);
         if (!row) return;
         var rect = row.getBoundingClientRect();
-        if (rect.right - e.clientX <= ZONE_EYE) {
+        var dx = rect.right - e.clientX;
+        // 星标区：固定/取消固定（与入口页的 ☆ 共用同一份 state.pinned）
+        if (dx <= ZONE_STAR) {
+          try {
+            e.preventDefault();
+            e.stopPropagation();
+          } catch (err3) {}
+          var nid = row.getAttribute(DATA.id);
+          if (nid) {
+            var known = knownIdsFrom(sections);
+            var isPinned = pinnedIds(state, known).indexOf(nid) >= 0;
+            setPinned(nid, !isPinned);
+          }
+          return;
+        }
+        if (dx <= ZONE_EYE) {
           try {
             e.preventDefault();
             e.stopPropagation();
@@ -2716,12 +2774,11 @@ window.__ModuleLoader__.load({
                 title: t ? t("keyboardHint") : DICT.zh.keyboardHint,
                 style: {
                   fontSize: "12px",
-                  lineHeight: "1.3",
+                  lineHeight: "1.35",
                   color: "var(--dsw-alias-label-secondary,#888)",
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  maxWidth: "280px",
+                  whiteSpace: "pre-line",
+                  maxWidth: "360px",
+                  textAlign: "left",
                 },
               },
               t ? t("editHint") : DICT.zh.editHint,

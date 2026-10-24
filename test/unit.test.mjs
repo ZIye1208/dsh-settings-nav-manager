@@ -218,6 +218,28 @@ test("buildCss：关键选择器齐全（升级断链能靠这条守住）", () 
   }
 });
 
+test("buildCss：编辑模式星标与眼睛并排（1.4.0 的两段命中区）", () => {
+  const css = T.buildCss();
+  // 星标：::before，右端 7px 起；眼睛：::after 挪到 31px；行内右侧预留 56px
+  assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin]::before'), "缺少星标基础规则");
+  assert.ok(
+    css.includes('[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin-state="1"]::before'),
+    "缺少「已固定」实心态规则",
+  );
+  assert.match(css, /\[data-snm-nav-pin\]::before\{[^}]*right:7px/, "星标没放在右端 7px");
+  assert.match(css, /::after\{[^}]*right:31px/, "眼睛没挪到右端 31px");
+  assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row]{padding-right:56px;}'), "行内右侧没预留 56px");
+});
+
+test("编辑模式文案：说明点到星标/眼睛，且分行", () => {
+  assert.ok(T.DICT.zh.editHint.includes("星标"), "中文说明没提星标");
+  assert.ok(T.DICT.zh.editHint.includes("眼睛"), "中文说明没提眼睛");
+  assert.ok(T.DICT.zh.editHint.includes("\n"), "中文说明没分行（单行会截断）");
+  assert.ok(T.DICT.en.editHint.includes("\n"), "英文说明没分行");
+  // 不用 emoji：部分字体/终端缺字形会显示成方块（截图上就踩过）
+  assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(T.DICT.zh.editHint), "说明里不该混 emoji 图标");
+});
+
 test("文案表：中英双语键集合一致", () => {
   assert.deepEqual(Object.keys(T.DICT.zh).sort(), Object.keys(T.DICT.en).sort());
 });

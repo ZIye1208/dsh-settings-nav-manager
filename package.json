@@ -1,9 +1,9 @@
 {
   "name": "dsh-settings-nav-manager",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": false,
   "license": "MIT",
-  "description": "DSH 设置页导航管理插件 —— 拖拽排序 · 显隐 · 抽屉收纳 · 持久化 · 侧栏快捷入口",
+  "description": "DSH 设置页导航管理插件 —— 拖拽排序 · 显隐 · 星标固定 · 抽屉收纳 · 持久化 · 侧栏快捷入口",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ZIye1208/dsh-settings-nav-manager.git"

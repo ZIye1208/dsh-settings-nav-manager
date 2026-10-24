@@ -152,6 +152,9 @@ async function runRound(cdp, port, version) {
 
 async function main() {
   const keep = process.argv.includes("--keep");
+  // --shot=<文件>：跑完用例后额外截一张「编辑模式」实况图（前端样式/图标改动时看效果用）
+  const shotArg = process.argv.find((a) => a.startsWith("--shot="));
+  const shotPath = shotArg ? shotArg.slice(7) : null;
   await prepare();
   const { server, port } = await serve();
 
@@ -200,6 +203,37 @@ async function main() {
     const now = await runRound(cdp, port, "new");
     print(now);
     if (now.errors && now.errors.length) log("  页面报错: " + now.errors.join(" | "));
+
+    if (shotPath) {
+      await runRound(cdp, port, "new"); // 回到新版页面（上一轮可能停在旧版）
+      const demoExpr = `window.__demo().then(function () {
+        return new Promise(function (ok) {
+          setTimeout(function () {
+            var cells = document.querySelectorAll('[class*="navCell"]');
+            if (cells.length) {
+              var c = cells[0];
+              var r = c.getBoundingClientRect();
+              c.dispatchEvent(new MouseEvent('click', {
+                bubbles: true, cancelable: true, composed: true,
+                clientX: r.right - 12, clientY: r.top + r.height / 2, button: 0,
+              }));
+            }
+            setTimeout(ok, 350);
+          }, 250);
+        });
+      })`;
+      const demo = await cdp.send("Runtime.evaluate", {
+        expression: demoExpr,
+        awaitPromise: true,
+        returnByValue: true,
+        timeout: 30000,
+      });
+      if (demo.exceptionDetails) throw new Error("截图准备失败: " + JSON.stringify(demo.exceptionDetails));
+      await new Promise((r) => setTimeout(r, 500));
+      const shot = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+      await writeFile(shotPath, Buffer.from(shot.data, "base64"));
+      log("\n截图已保存: " + shotPath);
+    }
 
     const oldMap = new Map(old.results.map((c) => [c.name, c]));
     const newFails = now.results.filter((c) => !c.pass);

@@ -8,3 +8,6 @@ package-lock.json
 # e2e 运行时生成（test/e2e.mjs 会自动清理）
 test/harness/under-test.js
 test/harness/legacy.js
+
+# 测试台渲染的效果图（本地证据，不入库）
+assets/preview-*.png

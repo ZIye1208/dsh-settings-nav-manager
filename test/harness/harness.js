@@ -381,6 +381,18 @@
     });
     el.dispatchEvent(ev);
   }
+  // 导航行右端现在有两段命中区（client.js 侧 ZONE_STAR=26 / ZONE_EYE=50，距行右边缘）：
+  // 星标 0..26px、眼睛 26..50px。落点取各自中心，改动这两个常量时同步。
+  var DX_STAR = 12;
+  var DX_EYE = 40;
+  function clickEye(cell) {
+    var r = cell.getBoundingClientRect();
+    clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
+  }
+  function clickStar(cell) {
+    var r = cell.getBoundingClientRect();
+    clickAt(cell, r.right - DX_STAR, r.top + r.height / 2);
+  }
   function clickAt(el, x, y) {
     var r = el.getBoundingClientRect();
     var cx = typeof x === "number" ? x : r.left + r.width / 2;
@@ -528,18 +540,32 @@
     return sh;
   }
 
+  // 真解析词典（而不是把 key 原样吐出来）：这样截图里看到的是真实文案，
+  // 也能顺带咬住「键存在但表格写错语言」这类问题。未注册的 key 仍回退成 key。
+  var localeDicts = {};
+  function makeLocale() {
+    return {
+      bind: function (ns) {
+        return function (k) {
+          var table = localeDicts[ns];
+          var pack = table && table.zh;
+          if (pack && typeof pack[k] === "string") return pack[k];
+          if (table && typeof table[k] === "string") return table[k];
+          return k;
+        };
+      },
+      register: function (ns, table) {
+        localeDicts[ns] = table;
+        return function () {
+          delete localeDicts[ns];
+        };
+      },
+    };
+  }
+
   function makeCtx() {
     return {
-      locale: {
-        bind: function () {
-          return function (k) {
-            return k;
-          };
-        },
-        register: function () {
-          return function () {};
-        },
-      },
+      locale: makeLocale(),
       effect: function (fn) {
         var d = fn();
         if (typeof d === "function") env.disposers.push(d);
@@ -667,7 +693,7 @@
       await enterEditing();
       var cell = panelCells()[0];
       var r = cell.getBoundingClientRect();
-      clickAt(cell, r.right - 10, r.top + r.height / 2); // 点第一行眼睛
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2); // 点第一行眼睛
       await sleep(120);
       var w = env.store.value || {};
       var items = w.groups && w.groups[0] ? w.groups[0].items : [];
@@ -687,10 +713,10 @@
       await enterEditing();
       var cell = cellBySection("general");
       var r = cell.getBoundingClientRect();
-      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
       await sleep(80);
       assert(cell.getAttribute("data-snm-hidden") === "1", "点眼睛后该行未标隐藏");
-      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
       await sleep(80);
       assert(cell.getAttribute("data-snm-hidden") !== "1", "再点一次未恢复显示");
       return "hidden=" + JSON.stringify(env.store.value.hidden);
@@ -847,7 +873,7 @@
       await enterEditing();
       var cell = cellBySection("models");
       var r = cell.getBoundingClientRect();
-      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
       await sleep(220);
       var w = env.store.value || {};
       assert((w.hidden || []).indexOf("models") >= 0, "没认领到真实命名空间：" + JSON.stringify(w.hidden));
@@ -877,7 +903,7 @@
       await enterEditing();
       var cell = cellBySection("models");
       var r = cell.getBoundingClientRect();
-      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
       await sleep(220);
       var w = env.store.value || {};
       assert((w.hidden || []).indexOf("models") >= 0, "首次使用就被失败关闭挡住了：" + JSON.stringify(w));
@@ -904,7 +930,7 @@
       await enterEditing();
       var cell = cellBySection("models");
       var r = cell.getBoundingClientRect();
-      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
       await sleep(200);
       var w = env.store.value || {};
       assert((w.hidden || []).indexOf("models") >= 0, "分路重试后仍未写进去：" + JSON.stringify(w.hidden));
@@ -933,7 +959,7 @@
       await enterEditing();
       var cell = cellBySection("models");
       var r = cell.getBoundingClientRect();
-      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
       await sleep(200);
       var methods = env.store.attempts.map(function (a) {
         return a.method;
@@ -961,7 +987,7 @@
       await enterEditing();
       var cell = cellBySection("models");
       var r = cell.getBoundingClientRect();
-      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
       await sleep(220);
       assert(env.store.attempts.length === 0, "歧义时仍发起了写入：" + JSON.stringify(env.store.attempts));
       assert(document.querySelector("[data-snm-notice]"), "失败关闭却没有任何提示");
@@ -983,7 +1009,7 @@
       await enterEditing();
       var cell = cellBySection("models");
       var r = cell.getBoundingClientRect();
-      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
       await sleep(220);
       assert(env.store.attempts.length === 0, "值形状不符仍被认领：" + JSON.stringify(env.store.attempts));
       return "attempts=0";
@@ -1028,7 +1054,7 @@
       env.store.rejectMessage = 'No configurable plugin entry "settings-nav-manager"';
       var cell = cellBySection("general");
       var r = cell.getBoundingClientRect();
-      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
       await sleep(150);
       var notice = document.querySelector("[data-snm-notice]");
       assert(notice, "保存失败后没有任何可见提示（静默失败）");
@@ -1047,7 +1073,7 @@
       env.store.revision++; // 另一个窗口抢先改过
       var cell = cellBySection("models");
       var r = cell.getBoundingClientRect();
-      clickAt(cell, r.right - 10, r.top + r.height / 2);
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
       await sleep(250);
       var w = env.store.value || {};
       assert((w.hidden || []).indexOf("models") >= 0, "冲突后未成功重放：" + JSON.stringify(w.hidden));
@@ -1303,6 +1329,55 @@
       });
       assert(pins.length <= 5, "固定行超过了上限（" + pins.length + "）");
       return "固定行 " + pins.length + " 个";
+    },
+  });
+
+  // ── 1.4.0：编辑模式里的星标（导航行右端，与眼睛并排）─────────
+  scenarios.push({
+    name: "编辑模式点星标：固定/取消固定，侧栏行与行状态一起变",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var cell = cellBySection("models");
+      assert(cell.getAttribute("data-snm-nav-pin") === "1", "编辑模式下导航行没打上星标位");
+      assert(cell.getAttribute("data-snm-nav-pin-state") === "0", "初始不该是已固定态");
+      clickStar(cell);
+      await sleep(250);
+      assert(cell.getAttribute("data-snm-nav-pin-state") === "1", "点星标后行状态没变成已固定");
+      assert(sidebarRow("snm-pin-models"), "点星标后侧栏没出现固定行");
+      assert((env.store.value.pinned || []).indexOf("models") >= 0, "pinned 没落盘");
+      assert(document.querySelector("[data-snm-notice]") === null, "成功却弹了提示");
+      clickStar(cell);
+      await sleep(250);
+      assert(cell.getAttribute("data-snm-nav-pin-state") === "0", "再点一次行状态没回到未固定");
+      assert(!sidebarRow("snm-pin-models"), "取消固定后侧栏行还在");
+      assert((env.store.value.pinned || []).indexOf("models") < 0, "pinned 没从磁盘清掉");
+      return "星标切换正常";
+    },
+  });
+
+  scenarios.push({
+    name: "隐藏分区点星标：给提示且不改 pinned、不改磁盘",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var cell = cellBySection("models");
+      clickEye(cell); // 先隐藏
+      await sleep(150);
+      assert(cell.getAttribute("data-snm-hidden") === "1", "前置失败：行没被隐藏");
+      assert(cell.getAttribute("data-snm-nav-pin-state") === "0", "隐藏后不该自动变成已固定");
+      clickStar(cell);
+      await sleep(200);
+      var notice = document.querySelector("[data-snm-notice]");
+      assert(notice && notice.textContent.length > 0, "隐藏分区点星标没有任何提示（静默失效）");
+      assert(cell.getAttribute("data-snm-nav-pin-state") === "0", "隐藏分区竟然被固定了");
+      assert(!sidebarRow("snm-pin-models"), "隐藏分区被固定到侧栏了");
+      assert((env.store.value.pinned || []).length === 0, "pinned 被改写了：" + JSON.stringify(env.store.value.pinned));
+      return "提示=" + (notice.textContent || "").slice(0, 20);
     },
   });
 

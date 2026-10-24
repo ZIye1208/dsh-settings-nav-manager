@@ -5,7 +5,7 @@
   },
   "gear": "Edit navigation",
   "gearExit": "Exit navigation editing",
-  "editHint": "Drag to reorder · Eye hides · Double-click renames · Drawers collect · Switch by the gear hides the sidebar entry",
+  "editHint": "Drag to reorder · row end: eye hides, star pins to the sidebar\nDouble-click a drawer name to rename · “+ New drawer” groups items\nThe switch by the gear shows/hides the sidebar entry",
   "keyboardHint": "Alt+↑/↓ reorder · h hide · Enter collapse · F2 rename",
   "hidden": "Hidden",
   "show": "Show",
