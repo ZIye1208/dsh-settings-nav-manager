@@ -9,7 +9,7 @@
   var SECTIONS = [
     { id: "general", order: 0, label: "通用" },
     { id: "account", order: 1, label: "账户" },
-    { id: "models", order: 2, label: "模型" },
+    { id: "models", order: 2, label: "模型", noIcon: true },
     { id: "plugins", order: 3, label: "插件" },
   ];
   // 磁盘上「上次保存」的排版：拖过序、有抽屉、隐藏了一项
@@ -300,18 +300,26 @@
     var list = document.createElement("div");
     list.className = "xx_navList";
     SECTIONS.forEach(function (sec) {
+      // 真机上存在「注册了分区但不渲染行」的情况（宿主按条件过滤），
+      // 这种数量不等的局面必须能认全剩下的行，所以测试台要能复现。
+      if (sec.noRow) return;
       var btn = document.createElement("button");
       btn.type = "button";
       btn.className = "xx_navCell";
       btn.setAttribute("data-section", sec.id);
-      var icon = document.createElement("span");
-      icon.className = "xx_navIcon";
-      icon.style.width = "16px";
-      icon.style.height = "16px";
+      // 真实宿主里有些分区没有前置图标（navIcon 返回 null），这类行只剩一个 label，
+      // 图标的定位/遮罩必须照样成立——测试台要能复现这一点。
+      if (!sec.noIcon) {
+        var icon = document.createElement("span");
+        icon.className = "xx_navIcon";
+        icon.style.width = "16px";
+        icon.style.height = "16px";
+        btn.appendChild(icon);
+      }
       var label = document.createElement("span");
       label.className = "xx_navLabel";
-      label.textContent = sec.label;
-      btn.appendChild(icon);
+      // rowLabel 可以跟注册的 label 不同：真机上宿主会加后缀/截断（「插件市场设置」显示成「插件市场」）
+      label.textContent = sec.rowLabel || sec.label;
       btn.appendChild(label);
       btn.addEventListener("click", function () {
         if (env.shell && env.shell.dead) return; // 假装宿主这次点了没反应
@@ -1403,6 +1411,97 @@
       var after = gear2.getBoundingClientRect().right;
       assert(Math.abs(after - before) < 0.5, "告警把齿轮挤动了：" + before + " → " + after);
       return "浮层定位正常，齿轮未位移";
+    },
+  });
+
+  scenarios.push({
+    name: "没有前置图标的行，两颗图标照样出现且右对齐",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      // SECTIONS 里 models 是 noIcon（真实宿主有这种分区），这里必须也能画出眼睛+星标
+      var bare = cellBySection("models");
+      var rich = cellBySection("general");
+      assert(bare && rich, "测试台缺少对照行");
+      var mb = getComputedStyle(bare, "::before");
+      var mr = getComputedStyle(rich, "::before");
+      var maskB = mb.maskImage || mb.webkitMaskImage || "";
+      assert(maskB && maskB !== "none", "无图标行没有画出 ::before 图标层");
+      assert((maskB.match(/data:image\/svg/g) || []).length === 2, "无图标行只画出一层遮罩：" + maskB.slice(0, 60));
+      var posB = mb.maskPosition || mb.webkitMaskPosition || "";
+      var posR = mr.maskPosition || mr.webkitMaskPosition || "";
+      // 浏览器会把 right 7px 归一化成 calc(100% - 7px)：只校验像素量和两行一致
+      var has = function (pos, n) {
+        return new RegExp("(^|[^\\d])" + n + "px").test(pos);
+      };
+      assert(has(posB, 7) && has(posB, 29), "星标/眼睛位置不是 7px/29px：" + posB);
+      assert(posB === posR, "无图标行与普通行的图标定位不一致：" + posB + " vs " + posR);
+      return "两层遮罩与定位一致：" + posB;
+    },
+  });
+
+  scenarios.push({
+    name: "说明淡出后不留空气泡（卡片外观在每一行自己身上）",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var bubble = document.querySelector("[data-snm-bubble]");
+      var hint = document.querySelector("[data-snm-hint]");
+      assert(bubble && hint, "编辑模式没有说明浮层");
+      var shellBg = getComputedStyle(bubble).backgroundColor;
+      var rowBg = getComputedStyle(hint).backgroundColor;
+      var transparent = function (c) {
+        return !c || c === "transparent" || /rgba\(0,\s*0,\s*0,\s*0\)/.test(c);
+      };
+      assert(transparent(shellBg), "气泡外壳还带着底色，淡出后会留下一个空框：" + shellBg);
+      assert(!transparent(rowBg), "说明行自己没有底色，淡出时框和字会不同步：" + rowBg);
+      var anim = getComputedStyle(hint).animationName || "";
+      assert(/snm-hint-fade/.test(anim), "说明行没有淡出动画：" + anim);
+      return "外壳透明、行自带卡片 + 淡出动画";
+    },
+  });
+
+  scenarios.push({
+    name: "分区数与行数不等（有分区不渲染行）也能认全每一行",
+    run: async function () {
+      // 在中间塞一个「注册了但没有行」的分区：数量不等后，tail 行不能失联
+      var ghost = { id: "ghost", order: 5, label: "幽灵分区", noRow: true };
+      var market = { id: "market", order: 6, label: "插件市场设置", rowLabel: "插件市场" };
+      SECTIONS.splice(2, 0, ghost);
+      SECTIONS.push(market);
+      try {
+        env.store = makeStore(SAVED, 3);
+        applyFresh();
+        await openPanel();
+        await enterEditing();
+        var cells = document.querySelectorAll("[data-snm-nav] [class*='navCell']");
+        assert(cells.length === SECTIONS.length - 1, "测试台行数不对：" + cells.length + " vs " + (SECTIONS.length - 1));
+        for (var i = 0; i < cells.length; i++) {
+          assert(cells[i].getAttribute("data-snm-row") === "1", "第 " + (i + 1) + " 行没被认出来（图标会消失）");
+          var mb = getComputedStyle(cells[i], "::before");
+          var mask = mb.maskImage || mb.webkitMaskImage || "";
+          assert(mask && mask !== "none", "第 " + (i + 1) + " 行没画出图标层");
+        }
+        // 数量不等 + 行文本被宿主改过（「插件市场设置」→「插件市场」）：
+        // 旧实现两步都走不通，这一行既没图标也不能固定 —— 正是真机上的现象
+        var mk = cellBySection("market");
+        assert(mk, "插件市场那一行没认出来（图标会消失）");
+        assert(mk.getAttribute("data-snm-id") === "market", "认错行：" + mk.getAttribute("data-snm-id"));
+        assert(mk.querySelector("[class*='navLabel']").textContent === "插件市场", "认错了行");
+        var models = cellBySection("models");
+        assert(models && models.getAttribute("data-snm-id") === "models", "中间的模型行被串掉了");
+        assert(cellBySection("plugins"), "插件那一行（最后一个）也没认出来");
+        assert(!sidebarRow("snm-pin-ghost"), "不渲染行的分区不该被固定");
+        return (cells.length) + " 行全部认全，幽灵分区 + 行文本被改也能对上";
+      } finally {
+        SECTIONS.splice(2, 1);
+        SECTIONS.pop();
+        resetEnv();
+      }
     },
   });
 

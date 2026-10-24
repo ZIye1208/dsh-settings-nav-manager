@@ -48,6 +48,7 @@ window.__ModuleLoader__.load({
       editing: "data-snm-editing",
       row: "data-snm-row",
       id: "data-snm-id",
+      unknown: "data-snm-unknown",
       hidden: "data-snm-hidden",
       inGroup: "data-snm-in-group",
       collapsed: "data-snm-collapsed",
@@ -724,6 +725,10 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         "}",
         '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"][data-snm-nav-pin-state="1"]::before{',
         iconMask(starPinned, off),
+        "}",
+        // 没认出来的行：图标照样在，只是压暗、点不动（别让它凭空消失）
+        '[data-snm-editing="1"] [data-snm-row][data-snm-unknown]::before{',
+        "  opacity:.22;",
         "}",
         // 隐藏：只置灰内容，图标保持可见、可点回
         '[data-snm-row][data-snm-hidden="1"] [class*="navLabel"],',
@@ -1442,9 +1447,12 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         if (!panel) return null;
         return panel.querySelector(SEL.navList);
       }
+      // 认行范围：navList 下**所有** [class*=navCell]，不再只认直接子节点。
+      // 真机上有的分区行被宿主多包了一层（没有前置图标的行），只用 :scope > 会漏认，
+      // 漏认的行既没有 data-snm-row（两颗图标凭空消失），也拿不到 order（看起来「串位置」）。
       function navCells(nav) {
         if (!nav) return [];
-        var list = nav.querySelectorAll(":scope > " + SEL.navCell);
+        var list = nav.querySelectorAll(SEL.navCell);
         return Array.prototype.slice.call(list);
       }
       function rowLabel(cell) {
@@ -1461,39 +1469,86 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         return null;
       }
 
-      // ── 认行：序号为主、label 为兜底，双向校验 ─────────────────
+      // ── 认行：label 精确 → 序号 → 包含关系 → 位置兜底 ───────────
+      // 真机上分区数量与行数并不总是相等（有的分区注册了但不渲染行），
+      // 旧实现「长度不等就完全不信序号」，导致最后几行认不出来：
+      // 既没有两颗图标，也拿不到 order —— 用户看到的就是「星星串位置 / 凭空消失」。
+      function normLabel(text) {
+        return cleanText(text).replace(/\s+/g, "").toLowerCase();
+      }
       function markRows(nav) {
         var cells = navCells(nav);
         var byLabel = dict();
+        var knownOrder = [];
         for (var s = 0; s < sections.length; s++) {
-          var key = sections[s].label;
+          var key = normLabel(sections[s].label);
           if (key && !own(byLabel, key)) byLabel[key] = sections[s].id;
+          if (sections[s].id) knownOrder.push(sections[s].id);
         }
-        var sameLen = cells.length === sections.length;
         var used = dict();
         var mappedCount = 0;
-        for (var i = 0; i < cells.length; i++) {
-          var cell = cells[i];
-          var label = rowLabel(cell);
-          var id = null;
-          if (sameLen && sections[i] && sections[i].id) {
-            // 文本一致（或还没渲染出文本）→ 按序号确认
-            if (!label || label === sections[i].label) id = sections[i].id;
+        var free = []; // 还没认出来的格子，保持 DOM 顺序
+        var take = function (cell, id) {
+          used[id] = 1;
+          mappedCount++;
+          cell.setAttribute(DATA.row, "1");
+          cell.setAttribute(DATA.id, id);
+          cell.removeAttribute(DATA.unknown);
+        };
+        var key0, i, j, id;
+
+        // ① label 归一化后精确匹配（与行数无关，最可靠）
+        for (i = 0; i < cells.length; i++) {
+          key0 = normLabel(rowLabel(cells[i]));
+          id = key0 && own(byLabel, key0) ? byLabel[key0] : null;
+          if (id && !own(used, id)) take(cells[i], id);
+          else free.push(cells[i]);
+        }
+        // ② 行数与分区数相等时，剩余格子按位置对齐
+        if (cells.length === sections.length && free.length) {
+          for (i = 0; i < cells.length && free.length; i++) {
+            if (cells[i].getAttribute(DATA.id)) continue;
+            if (sections[i] && sections[i].id && !own(used, sections[i].id)) {
+              take(cells[i], sections[i].id);
+              free.splice(free.indexOf(cells[i]), 1);
+            }
           }
-          if (!id && label && own(byLabel, label)) id = byLabel[label];
-          if (id && own(used, id)) id = null; // 重复 id 不认
-          if (!id && sameLen && sections[i] && sections[i].id && !own(used, sections[i].id)) {
-            id = sections[i].id; // 序号兜底
+        }
+        // ③ 包含关系（宿主给 label 加了后缀/前缀时的兜底，要求唯一）
+        for (j = 0; j < free.length; j++) {
+          var cell = free[j];
+          var text = normLabel(rowLabel(cell));
+          if (!text) continue;
+          var hit = null;
+          var hits = 0;
+          for (i = 0; i < sections.length; i++) {
+            var other = normLabel(sections[i].label);
+            if (!other || own(used, sections[i].id)) continue;
+            if (other.indexOf(text) >= 0 || text.indexOf(other) >= 0) {
+              hit = sections[i].id;
+              hits++;
+            }
           }
-          if (id) {
-            used[id] = 1;
-            mappedCount++;
-            cell.setAttribute(DATA.row, "1");
-            cell.setAttribute(DATA.id, id);
-          } else {
-            cell.removeAttribute(DATA.row);
-            cell.removeAttribute(DATA.id);
+          if (hit && hits === 1) {
+            take(cell, hit);
+            free.splice(j, 1);
+            j--;
           }
+        }
+        // ④ 仍有剩格：按位置把剩余分区依次补上（宁可认错也别让图标消失）
+        if (free.length) {
+          for (i = 0, j = 0; i < knownOrder.length && j < free.length; i++) {
+            if (own(used, knownOrder[i])) continue;
+            take(free[j], knownOrder[i]);
+            j++;
+          }
+          free = free.slice(j);
+        }
+        // ⑤ 真的一格都不剩：打上 row 但标 unknown（图标变暗、点了没反应，好过凭空消失）
+        for (i = 0; i < free.length; i++) {
+          free[i].setAttribute(DATA.row, "1");
+          free[i].removeAttribute(DATA.id);
+          free[i].setAttribute(DATA.unknown, "1");
         }
         return mappedCount;
       }
@@ -2790,6 +2845,19 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
           : null;
         // 说明与告警做成「浮层气泡」：绝对定位在齿轮左侧，不参与 header 的 flex 排版，
         // 既不会挤占设置内容，也不会因为红字变长把齿轮推到一边。
+        // 卡片外观放在每一行自己身上：说明行淡出时，它的底和边一起消失，
+        // 不会留下一个「只有框没有字」的空气泡（用户实测反馈）。
+        var cardStyle = {
+          padding: "9px 11px",
+          borderRadius: "8px",
+          fontSize: "12px",
+          lineHeight: "1.45",
+          textAlign: "left",
+          whiteSpace: "pre-line",
+          background: "var(--dsw-alias-bg-layer-2,#23252b)",
+          border: "1px solid var(--dsw-alias-border,rgba(128,128,128,.3))",
+          boxShadow: "var(--dsw-elevation-prominent,0 8px 24px rgba(0,0,0,.4))",
+        };
         var bubbleRows = [];
         if (notice) {
           bubbleRows.push(
@@ -2799,7 +2867,9 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
                 key: "notice",
                 "data-snm-notice": "1",
                 role: "status",
-                style: { color: "var(--dsw-alias-state-error-primary,#e06c6c)", whiteSpace: "pre-line" },
+                style: Object.assign({}, cardStyle, {
+                  color: "var(--dsw-alias-state-error-primary,#e06c6c)",
+                }),
               },
               notice,
             ),
@@ -2813,7 +2883,9 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
                 key: "hint",
                 "data-snm-hint": "1",
                 title: t ? t("keyboardHint") : DICT.zh.keyboardHint,
-                style: { color: "var(--dsw-alias-label-secondary,#9aa0a6)", whiteSpace: "pre-line" },
+                style: Object.assign({}, cardStyle, {
+                  color: "var(--dsw-alias-label-secondary,#9aa0a6)",
+                }),
               },
               t ? t("editHint") : DICT.zh.editHint,
             ),
@@ -2832,17 +2904,9 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
                   zIndex: 30,
                   width: "298px",
                   maxWidth: "42vw",
-                  padding: "9px 11px",
                   display: "flex",
                   flexDirection: "column",
                   gap: "6px",
-                  borderRadius: "8px",
-                  fontSize: "12px",
-                  lineHeight: "1.45",
-                  textAlign: "left",
-                  background: "var(--dsw-alias-bg-layer-2,#23252b)",
-                  border: "1px solid var(--dsw-alias-border,rgba(128,128,128,.3))",
-                  boxShadow: "var(--dsw-elevation-prominent,0 8px 24px rgba(0,0,0,.4))",
                   pointerEvents: "none",
                 },
               },
