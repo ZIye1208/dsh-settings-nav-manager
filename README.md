@@ -1,6 +1,6 @@
 # dsh-settings-nav-manager
 
-> **DSH 设置页导航管理插件** —— 给设置页左侧分区导航加上「**拖拽排序 · 显隐 · 抽屉收纳**」，一键进入编辑模式随手整理，自动持久保存。
+> **DSH 设置页导航管理插件** —— 给设置页左侧分区导航加上「**拖拽排序 · 显隐 · 抽屉收纳**」，一键进入编辑模式随手整理，自动持久保存；还能把**常用分区钉到主界面侧栏，点一下直达**。
 
 适用于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的 `web`（网页版）与 `desktop`（桌面版）两个 profile。纯 JavaScript / ESM，**无需构建**。
 
@@ -8,7 +8,23 @@
 
 ## 产品演示
 
+![1.3.0 新版演示：入口页点 ☆ 固定分区，侧栏插件栏立刻多一行，点一下直接打开对应设置，主面板不切走](https://raw.githubusercontent.com/ZIye1208/dsh-settings-nav-manager/main/assets/demo-1.3.gif)
+
+### 🆕 1.3.0 更新的功能
+
+| 功能 | 说明 |
+|---|---|
+| **📌 分区固定到侧栏** | 入口页每行右侧的 ☆ 一点变 ★，该分区就钉到主界面插件栏（最多 5 个，排在「设置导航」入口之后）。点那一行**直接打开设置并选中该分区**，而且当前主面板不会被切走——关掉设置还停在你原来的页面。 |
+| **兜底页** | 每个固定行都配一个同名 `main` 页。哪怕布局恢复 / 深链 / 键盘激活绕过了点击拦截，也不会抛 `layout.selectPanel: panel "..." is not registered`，而是看到一个有「打开设置 / 返回」的页。 |
+| **隐藏即取消固定** | 已隐藏的分区不能钉（☆ 置灰）；反过来，隐藏一个已钉的分区会自动取消它的固定——入口藏在设置里，钉着也点不到。 |
+| **语言无关** | 固定行的标题走实时解析，切到英文界面后标签跟着变，不需要重建注册。 |
+
+<details>
+<summary>总览演示：编辑模式 · 拖拽排序 · 显隐 · 抽屉收纳</summary>
+
 ![产品演示：进入编辑模式、拖拽排序、眼睛显隐、抽屉收纳](https://raw.githubusercontent.com/ZIye1208/dsh-settings-nav-manager/main/assets/demo.gif)
+
+</details>
 
 ---
 
@@ -101,6 +117,8 @@ dsh plugin --profile <web|desktop> remove dsh-settings-nav-manager
    - **双击**抽屉名改名，点 `×` **解散**（成员回未分组、保序）。
 5. **恢复默认**：点底部「恢复默认」清空所有整理，回到宿主原始顺序。
 6. 按 `Escape` 或再点齿轮**退出**编辑模式。所有改动即时持久化，重启保留。
+7. **钉到侧栏（1.3.0）**：主界面插件栏点「设置导航」进入入口页 → 点某行右侧的 **☆**（变 ★）→ 侧栏插件栏立刻多一行，点它直接打开设置并选中该分区；再点 **★** 取消。最多 5 个。
+8. **收起入口行**：编辑模式下齿轮旁「侧栏入口」开关可把「设置导航」那行藏起来（页面保留在册，不会指向空面板）；想找回就再进设置点一次。
 
 ---
 
@@ -203,7 +221,7 @@ dsh-settings-nav-manager/
 ├── cordis.patch.yml   # 插件注册（id = settings-nav-manager）
 ├── locale/            # zh.json / en.json（由 client.js 字典生成）
 ├── icon.svg           # 插件图标
-├── assets/demo.gif    # 产品演示动图
+├── assets/            # demo-1.3.gif（分区固定演示）/ demo.gif（总览演示）
 ├── tools/gen-locale.mjs
 ├── docs/              # 方案文档（侧栏快捷入口的分阶段设计）
 └── test/              # unit / repo / e2e（含 harness）
