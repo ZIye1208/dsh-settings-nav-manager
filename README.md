@@ -18,6 +18,8 @@
 
 上图是 1.0 – 1.2 的整理能力，下图是 1.3.0 新增的「固定到侧栏」。
 
+> 附：DSH 全局导航折叠功能由 [dsh-nav-fold](https://github.com/nico-zhuang/dsh-nav-fold) 插件实现。
+
 ### 🆕 1.4.0 更新的功能
 
 | 功能 | 说明 |
