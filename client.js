@@ -675,7 +675,7 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       var off = 'url("data:image/svg+xml,' + encodeURIComponent(eyeOff) + '")';
       // 空图层：不固定 / 非入口行时占位，保证两个遮罩层的位置固定
       var blank = 'url("data:image/svg+xml,' + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'></svg>") + '")';
-      // 两颗图标放进同一个 ::before 的两个遮罩层：位置同源，永远齐平。
+      // 两颗图标放进同一个 ::after 的两个遮罩层：位置同源，永远齐平。用 ::after 把 ::before 让给第三方插件。
       // 纵向用上下各 -9px 的对称外扩锚定「行中心」——即使宿主给某些行换了
       // 定位容器（有的行没有前置图标），对称外扩不改变中心，不会一高一低。
       function iconMask(star, eye) {
@@ -701,33 +701,39 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         "[data-snm-gear-wrap]:hover [data-snm-hint]{animation:none;opacity:1;}",
         "@keyframes snm-hint-fade{0%{opacity:1}80%{opacity:1}100%{opacity:0;}}",
         // 编辑模式：右端两颗图标（眼睛 + 星标），同一个伪元素的两个遮罩层。
+        // 用 ::after 而不是 ::before：dshmarket / dsh-pet / dsh-better-sidebar 这类插件
+        // 已经占了导航行的 ::before 来画自己的分区图标（content:"";flex:none;width:16px;
+        // height:16px;mask-image:...）。同一个伪元素上两套规则打架时，对方的 width/height
+        // 会把我们那条 left:0;right:0 的定位层压成 16px 小方块，两颗图标直接被裁掉——
+        // 真机上「这几行没有眼睛和星星」就是这么来的。
         // 保留位：星标 7..25、眼睛 29..47，中间 4px；行右 padding 48px。
-        '[data-snm-editing="1"] [data-snm-row]::before{',
+        '[data-snm-editing="1"] [data-snm-row]::after{',
         '  content:"";position:absolute;left:0;right:0;top:-9px;bottom:-9px;',
+        "  width:auto;height:auto;flex:none;",
         "  background-color:currentColor;opacity:.72;pointer-events:none;",
         iconMask(blank, on),
         "}",
         // 星标只打在有 data-snm-nav-pin 的行上；空心=未固定，实心=已固定
-        '[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin]::before{',
+        '[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin]::after{',
         iconMask(starIdle, on),
         "}",
-        '[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin-state="1"]::before{',
+        '[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin-state="1"]::after{',
         iconMask(starPinned, on),
         "  opacity:.95;",
         "}",
         // 已隐藏的分区不能固定：整对图标压暗（点了只给提示，JS 侧拦）
-        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"]::before{',
+        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"]::after{',
         iconMask(blank, off),
         "  opacity:.5;",
         "}",
-        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"][data-snm-nav-pin]::before{',
+        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"][data-snm-nav-pin]::after{',
         iconMask(starIdle, off),
         "}",
-        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"][data-snm-nav-pin-state="1"]::before{',
+        '[data-snm-editing="1"] [data-snm-row][data-snm-hidden="1"][data-snm-nav-pin-state="1"]::after{',
         iconMask(starPinned, off),
         "}",
         // 没认出来的行：图标照样在，只是压暗、点不动（别让它凭空消失）
-        '[data-snm-editing="1"] [data-snm-row][data-snm-unknown]::before{',
+        '[data-snm-editing="1"] [data-snm-row][data-snm-unknown]::after{',
         "  opacity:.22;",
         "}",
         // 隐藏：只置灰内容，图标保持可见、可点回

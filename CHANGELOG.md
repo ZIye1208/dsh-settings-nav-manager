@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.4.3
+
+1.4.2 只在「干净页面」里成立：真机上四行（OpenCode…、桌宠配置、插件市场、侧边卡片）的眼睛和星星**仍然整排不见**。原因是这些行被别的插件认领了。
+
+### 修复
+
+- **图标从 `::before` 移到 `::after`**：dshmarket / dsh-pet / dsh-better-sidebar 这类插件用 `::before` + `flex:none;width:16px;height:16px` 给自己的分区画图标，正好和我们的两颗图标抢同一个伪元素。两套规则合并后，我们的 `left:0;right:0` 定位层被 16px 的规则压成小方块，两层遮罩直接被裁没——现象就是「这一行没有眼睛和星星」。现在我们把 `::before` 完整让出来，自己的两颗图标只占 `::after`，并显式写 `width:auto;height:auto;flex:none` 防别家规则再次挤压。
+- 四位归属于四个插件的行与插件一一对应（`opencode-go-i18n`→dsh-opencode-go、`pets`→dsh-pet、`market`→dshmarket、`side-cards`→dsh-better-sidebar），所以此前只有「干净」的那些行是正常的。
+
+### 测试
+
+- **e2e 33 → 34 条**：新增「第三方插件占了 `::before`（dshmarket/dsh-pet 式）也不影响我们的两颗图标」——在行上注入对方的真实样式，断言我们的图标层仍是整行宽、两层遮罩位置不变（7px/29px）、且对方 `::before` 的 16px 分区图标还在。
+- 归零证据：换回 1.4.2 的 client.js 跑同一套 e2e，34 条里 3 条失败（「第三方占用 ::before 后我们的图标层没了：none」等），换回 1.4.3 全绿 34/34。
+- 单测 42 条、仓库校验 16 条不变（`::before` → `::after` 的断言同步改）。
+
 ## 1.4.2
 
 1.4.1 遗留的两处真机问题：**说明只淡出文字、气泡外壳留着**、**个别页签的眼睛和星星整排消失（看起来像串了位置）**。

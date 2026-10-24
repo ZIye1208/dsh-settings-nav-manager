@@ -1425,10 +1425,10 @@
       var bare = cellBySection("models");
       var rich = cellBySection("general");
       assert(bare && rich, "测试台缺少对照行");
-      var mb = getComputedStyle(bare, "::before");
-      var mr = getComputedStyle(rich, "::before");
+      var mb = getComputedStyle(bare, "::after");
+      var mr = getComputedStyle(rich, "::after");
       var maskB = mb.maskImage || mb.webkitMaskImage || "";
-      assert(maskB && maskB !== "none", "无图标行没有画出 ::before 图标层");
+      assert(maskB && maskB !== "none", "无图标行没有画出 ::after 图标层");
       assert((maskB.match(/data:image\/svg/g) || []).length === 2, "无图标行只画出一层遮罩：" + maskB.slice(0, 60));
       var posB = mb.maskPosition || mb.webkitMaskPosition || "";
       var posR = mr.maskPosition || mr.webkitMaskPosition || "";
@@ -1482,7 +1482,7 @@
         assert(cells.length === SECTIONS.length - 1, "测试台行数不对：" + cells.length + " vs " + (SECTIONS.length - 1));
         for (var i = 0; i < cells.length; i++) {
           assert(cells[i].getAttribute("data-snm-row") === "1", "第 " + (i + 1) + " 行没被认出来（图标会消失）");
-          var mb = getComputedStyle(cells[i], "::before");
+          var mb = getComputedStyle(cells[i], "::after");
           var mask = mb.maskImage || mb.webkitMaskImage || "";
           assert(mask && mask !== "none", "第 " + (i + 1) + " 行没画出图标层");
         }
@@ -1500,6 +1500,49 @@
       } finally {
         SECTIONS.splice(2, 1);
         SECTIONS.pop();
+        resetEnv();
+      }
+    },
+  });
+
+  scenarios.push({
+    name: "第三方插件占了 ::before（dshmarket/dsh-pet 式）也不影响我们的两颗图标",
+    run: async function () {
+      // 复刻 dshmarket / dsh-pet 的真实规则：它们把 ::before 拿来画自己的分区图标，
+      // 并给同一个伪元素写死 width/height:16px + flex:none。
+      // 我们要是也挤在 ::before 上，left:0;right:0 会被 16px 挤爆 → 图标裁掉（真机现象）。
+      var style = document.createElement("style");
+      style.id = "third-party-nav-icon";
+      style.textContent = [
+        '[data-third-nav] > svg{display:none;}',
+        '[data-third-nav]::before{content:"";flex:none;width:16px;height:16px;',
+        "  background-color:currentColor;",
+        "  -webkit-mask-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Crect width='16' height='16'/%3E%3C/svg%3E\");",
+        "  mask-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Crect width='16' height='16'/%3E%3C/svg%3E\");",
+        "  mask-position:center;mask-size:16px 16px;mask-repeat:no-repeat;}",
+      ].join("\n");
+      document.head.appendChild(style);
+      try {
+        env.store = makeStore(SAVED, 3);
+        applyFresh();
+        await openPanel();
+        await enterEditing();
+        var cell = cellBySection("general");
+        cell.setAttribute("data-third-nav", ""); // 第三方插件认领了同一行
+        await sleep(120);
+        var after = getComputedStyle(cell, "::after");
+        var mask = after.maskImage || after.webkitMaskImage || "";
+        assert((mask.match(/data:image\/svg/g) || []).length === 2, "第三方占用 ::before 后我们的图标层没了：" + mask.slice(0, 40));
+        assert(/7px/.test(after.maskPosition || "") && /29px/.test(after.maskPosition || ""), "图标位置被别家规则改掉了：" + after.maskPosition);
+        var rowW = cell.getBoundingClientRect().width;
+        var pseudoW = parseFloat(after.width);
+        assert(pseudoW > rowW - 2, "图标层被压成小方块了：" + pseudoW + "px（行宽 " + rowW + "px）");
+        // 对方的分区图标留在 ::before 上，不该被我们顶掉
+        var before = getComputedStyle(cell, "::before");
+        assert(before.width === "16px", "我们把对方的 ::before 分区图标顶掉了");
+        return "图标层 " + Math.round(pseudoW) + "px 宽、两层遮罩在，对方 ::before 16px 保留";
+      } finally {
+        style.remove();
         resetEnv();
       }
     },

@@ -207,7 +207,7 @@ test("buildCss：关键选择器齐全（升级断链能靠这条守住）", () 
   const css = T.buildCss();
   for (const sel of [
     "[data-snm-nav]",
-    "[data-snm-editing=\"1\"] [data-snm-row]::before",
+    "[data-snm-editing=\"1\"] [data-snm-row]::after",
     "[data-snm-editing=\"0\"] [data-snm-row][data-snm-hidden=\"1\"]{display:none;}",
     "[data-snm-row][data-snm-in-group]",
     "[data-snm-add-group]",
@@ -220,20 +220,22 @@ test("buildCss：关键选择器齐全（升级断链能靠这条守住）", () 
 
 test("buildCss：星标与眼睛是同一个伪元素的两层遮罩（1.4.1 防竖向错位）", () => {
   const css = T.buildCss();
-  // 两颗图标共用 ::before 的两个 mask 层：位置同源，不可能一高一低
-  assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row]::before'), "缺少图标基础规则");
-  assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin]::before'), "缺少星标层规则");
+  // 两颗图标共用 ::after 的两个 mask 层：位置同源，不可能一高一低
+  assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row]::after'), "缺少图标基础规则");
+  assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin]::after'), "缺少星标层规则");
   assert.ok(
-    css.includes('[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin-state="1"]::before'),
+    css.includes('[data-snm-editing="1"] [data-snm-row][data-snm-nav-pin-state="1"]::after'),
     "缺少「已固定」实心态规则",
   );
   assert.match(css, /mask-position:right 7px center,right 29px center/, "两层遮罩位置不对（星标 7px / 眼睛 29px）");
   assert.match(css, /mask-size:18px 18px,18px 18px/, "两层遮罩尺寸不对");
   // 上下各 -9px 对称外扩：宿主给某些行换了定位容器时，中心不变
   assert.match(css, /left:0;right:0;top:-9px;bottom:-9px;/, "图标层没有对称外扩（换容器就会错位）");
+  // 对方插件会给同一个伪元素写 width/height:16px，不显式声明就会被压成小方块
+  assert.match(css, /width:auto;height:auto;flex:none;/, "图标层没显式声明宽高（会被别家插件的 16px 规则裁掉）");
   assert.ok(css.includes('[data-snm-editing="1"] [data-snm-row]{padding-right:48px;}'), "行内右侧没预留 48px");
-  // 旧实现（眼睛独占 ::after）必须已经不在了，否则两层规则会互相覆盖
-  assert.ok(!css.includes('[data-snm-row]::after'), "还残留着眼睛的 ::after 规则");
+  // 1.4.3：::before 必须让给第三方插件（dshmarket / dsh-pet 用它画分区图标），我们只占 ::after
+  assert.ok(!/\[data-snm-row\][^"{]*::before/.test(css), "还占着 ::before，会和第三方插件的分区图标打架");
 });
 
 test("编辑模式文案：说明点到星标/眼睛，且分行", () => {
