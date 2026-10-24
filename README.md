@@ -227,7 +227,7 @@ node tools/sync-profile.mjs desktop -n   # 只演练，看会改哪些文件
 
 | 项 | 值 |
 |---|---|
-| DSH | `>=0.2.1-rc.2 <0.3.0`（`web` / `desktop` profile，实测 0.2.1-rc.2） |
+| DSH | `>=0.2.1-rc.2 <0.3.0`（`web` / `desktop` profile，**实测 0.2.1-rc.2 / 0.2.1-rc.3**） |
 | 运行时 | Node ≥ 20.18 |
 | 构建 | 无（纯 JS / ESM） |
 

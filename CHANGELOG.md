@@ -4,6 +4,11 @@
 
 评审 D-1 / D-2 的修复。这两条都属于「静默丢数据」：用户看不到任何异常，重启后排版就没了，而且消失的那次写盘是「成功」的，连失败提示都没有。
 
+### 兼容性
+
+- **已实测兼容 DSH Desktop `0.2.1-rc.3`**：逐项核对了本插件依赖的宿主契约——设置弹窗的 `sidebar.settings` 槽与其单例 store（`openSection` 深链）、`settings.action` / `settings.section` 子槽、`[data-shortcut-modal="settings"]` 与 `navList` / `navCell` / `navLabel` 结构及 `.navCell` 定位 CSS（`height:40px`、`padding:9px 16px 9px 12px`，与本插件 `::after` 图标层的 7px/29px、上下 −9px 外扩完全对得上）、侧栏 `sidebar.panellist` 行与 `selectPanel → ctx.layout.selectPanel`、`sidebar.footer.action`、`main` 槽与 `retainMainPanels` 的可达性校验（报错文案未变）、`ctx.remote.settings` 的 `describe/update/mutate` 与 `{writable,hasDocument,namespaces[{ns,revision,value,schema}]}` 视图。`dsh-client-ui-renderer` 与 rc.2 完全一致。
+- 兼容范围仍是 `>=0.2.1-rc.2 <0.3.0`，rc.2 不受影响。
+
 ### 修复
 
 - **D-2 读不到盘上的内容时不再写盘**：旧实现 `describe()` 一失败，内存态就被当成「空排版」，随后任意一次点眼睛/星标/拖拽都会把这份空态写回磁盘——一次网关抖动就变成一次静默清档。现在加了 `stateKnown` 门闩：只有 `describe()` 成功返回过才允许保存，读失败期间写操作直接短路，并在齿轮旁提示「未能读取已保存的排版，已暂停保存以免覆盖」。
