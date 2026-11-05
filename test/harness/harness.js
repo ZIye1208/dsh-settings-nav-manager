@@ -11,6 +11,8 @@
     { id: "account", order: 1, label: "账户" },
     { id: "models", order: 2, label: "模型", noIcon: true },
     { id: "plugins", order: 3, label: "插件" },
+    // 0.2.2 的形状：行里始终有 span.navIcon，但宿主没有自带字形 → 空容器
+    { id: "pet", order: 4, label: "桌宠配置", emptyIcon: true },
   ];
   // 磁盘上「上次保存」的排版：拖过序、有抽屉、隐藏了一项
   var SAVED = {
@@ -296,15 +298,18 @@
     return el;
   }
 
-  // ── 假设置面板（结构与宿主一致：portal 到 body 的直接子节点）──
+  // ── 假设置面板（0.2.2-rc.1 结构：panel 是 grid，title/nav/header/options 四块）──
+  // 宿主 DOM（settings-general 0.2.2）：panel > [div.navTitle, nav.nav > div.navList,
+  // div.header > (div.actions + button.close), div.options]，grid 分区
+  // "title header" / "nav options"，左列 188px。行内是 span.navIcon + span.navLabel。
   function buildPanel() {
     var panel = document.createElement("div");
     panel.setAttribute("data-shortcut-modal", "settings");
-    var nav = document.createElement("div");
-    nav.className = "xx_nav";
     var title = document.createElement("div");
     title.className = "xx_navTitle";
     title.textContent = "设置";
+    var nav = document.createElement("nav");
+    nav.className = "xx_nav";
     var list = document.createElement("div");
     list.className = "xx_navList";
     SECTIONS.forEach(function (sec) {
@@ -322,6 +327,14 @@
         icon.className = "xx_navIcon";
         icon.style.width = "16px";
         icon.style.height = "16px";
+        // 0.2.2 里「宿主没有自带字形」时这一格是空的，插件可经
+        // settings.section.icon 槽补上；有 glyph 时不许被别人抢。
+        if (!sec.emptyIcon) {
+          var glyph = document.createElement("span");
+          glyph.className = "xx_glyph";
+          glyph.textContent = sec.label.slice(0, 1);
+          icon.appendChild(glyph);
+        }
         btn.appendChild(icon);
       }
       var label = document.createElement("span");
@@ -335,18 +348,23 @@
       });
       list.appendChild(btn);
     });
-    nav.appendChild(title);
     nav.appendChild(list);
-    var content = document.createElement("div");
-    content.className = "xx_content";
+    // 0.2.2：齿轮槽（settings.action）在 header 里，而不是旧版的 nav 内
     var header = document.createElement("div");
     header.className = "xx_header";
     var actions = document.createElement("div");
     actions.className = "xx_actions";
     header.appendChild(actions);
-    content.appendChild(header);
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "xx_close";
+    header.appendChild(close);
+    var options = document.createElement("div");
+    options.className = "xx_options";
+    panel.appendChild(title);
     panel.appendChild(nav);
-    panel.appendChild(content);
+    panel.appendChild(header);
+    panel.appendChild(options);
     return panel;
   }
   function selectRow(id) {
@@ -526,6 +544,29 @@
     return panelEl();
   }
 
+  // 0.2.2：settings.section.icon 是 list 槽，宿主按行 id 渲染进 span.navIcon，
+  // 有注册就用注册的组件，没注册就退回宿主自带字形（fallback）。
+  function mountSectionIcon(id) {
+    var cell = panelCells().filter(function (c) {
+      return c.getAttribute("data-section") === id;
+    })[0];
+    if (!cell) return false;
+    var host = cell.querySelector(".xx_navIcon");
+    if (!host) return false;
+    var list = regs["settings.section.icon"] || [];
+    var rec = null;
+    for (var i = list.length - 1; i >= 0; i--) {
+      if (list[i].spec && list[i].spec.id === id) {
+        rec = list[i];
+        break;
+      }
+    }
+    if (!rec) return false;
+    host.textContent = "";
+    mountInto("section-icon:" + id, host, rec.Component, { size: 16, active: false });
+    return true;
+  }
+
   async function openPanel() {
     ensurePanel();
     await sleep(60);
@@ -618,6 +659,7 @@
           env.log.push({ op: "register", name: name, id: id });
           if (name === "settings.action") mountGear();
           if (name === "sidebar.panellist") mountSidebar();
+          if (name === "settings.section.icon") mountSectionIcon(id);
           if (name === "main" && env.panel === (spec && spec.key)) selectPanel(spec.key);
           return function () {
             var i = regs[name].indexOf(rec);
@@ -626,6 +668,26 @@
             if (name === "settings.action") {
               unmount("gear");
               mountGear();
+            }
+            if (name === "settings.section.icon") {
+              unmount("section-icon:" + id);
+              // 撤掉后回到宿主自带字形：清空并补回占位
+              var cell = panelCells().filter(function (c) {
+                return c.getAttribute("data-section") === id;
+              })[0];
+              var host = cell ? cell.querySelector(".xx_navIcon") : null;
+              if (host) {
+                host.textContent = "";
+                var sec = SECTIONS.filter(function (s) {
+                  return s.id === id;
+                })[0];
+                if (sec && !sec.emptyIcon) {
+                  var glyph = document.createElement("span");
+                  glyph.className = "xx_glyph";
+                  glyph.textContent = sec.label.slice(0, 1);
+                  host.appendChild(glyph);
+                }
+              }
             }
             if (name === "sidebar.panellist") {
               unmount("icon:" + id);
@@ -869,7 +931,7 @@
       assert((w.groups || []).length === 0, "未清空抽屉：" + JSON.stringify(w.groups));
       assert((w.hidden || []).length === 0, "未清空隐藏：" + JSON.stringify(w.hidden));
       assert(
-        JSON.stringify(w.order) === JSON.stringify(["general", "account", "models", "plugins"]),
+        JSON.stringify(w.order) === JSON.stringify(["general", "account", "models", "plugins", "pet"]),
         "顺序未回到宿主默认：" + JSON.stringify(w.order),
       );
       return "order=" + JSON.stringify(w.order);
@@ -1600,6 +1662,96 @@
       assert((w.hidden || []).indexOf("plugins") >= 0, "恢复后写盘把旧隐藏项丢了：" + JSON.stringify(w.hidden));
       assert((w.groups && w.groups[0] && w.groups[0].items || []).indexOf("account") >= 0, "恢复后写盘把抽屉成员丢了");
       return "写入=" + JSON.stringify(w.hidden) + "，writes=" + env.store.writes.length;
+    },
+  });
+
+  // ── 0.2.2-rc.1：设置弹窗改成 grid 四块，齿轮槽搬进 header ──────
+  scenarios.push({
+    name: "0.2.2 结构（title/nav/header/options + navIcon 包裹层）仍能认全每一行",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var panel = panelEl();
+      assert(panel.querySelector(".xx_navTitle"), "0.2.2 面板缺少 navTitle 块");
+      assert(panel.querySelector(".xx_header > .xx_actions"), "齿轮槽不在 header 里（0.2.2 结构变了）");
+      assert(panel.querySelector(".xx_options"), "0.2.2 面板缺少 options 块");
+      assert(document.querySelector("[data-snm-gear]"), "齿轮没挂进 header 的 actions");
+      var cells = panelCells();
+      assert(cells.length > 0, "没有认出任何行");
+      var marked = cells.filter(function (c) {
+        return c.getAttribute("data-snm-row") !== null && c.getAttribute("data-snm-id");
+      });
+      assert(marked.length === cells.length, "有行没被标记：" + marked.length + "/" + cells.length);
+      var masks = cells.filter(function (c) {
+        var s = getComputedStyle(c, "::after");
+        var m = s.maskImage || s.webkitMaskImage || "";
+        return (m.match(/data:image\/svg/g) || []).length === 2;
+      });
+      assert(masks.length === cells.length, "有行没画出两颗图标：" + masks.length + "/" + cells.length);
+      return cells.length + " 行全部识别，齿轮在 header";
+    },
+  });
+
+  // ── 0.2.2：给没有前置图标的分区补兜底图标（且不抢别人的）──
+  scenarios.push({
+    name: "0.2.2 图标槽：空图标行补兜底图标，宿主已有字形的不抢",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await sleep(300);
+      var empty = panelCells().filter(function (c) {
+        return c.getAttribute("data-section") === "pet";
+      })[0];
+      assert(empty, "没找到「空图标」那一行");
+      assert(
+        empty.querySelector("[data-snm-fallback-icon]"),
+        "空图标行没补上兜底图标（settings.section.icon 槽没接上）",
+      );
+      var hostRow = panelCells().filter(function (c) {
+        return c.getAttribute("data-section") === "general";
+      })[0];
+      assert(hostRow.querySelector(".xx_glyph"), "宿主自带的字形被我们清掉了");
+      assert(!hostRow.querySelector("[data-snm-fallback-icon]"), "不该抢宿主已有的图标");
+      var all = document.querySelectorAll("[data-snm-fallback-icon]");
+      assert(all.length === 1, "兜底图标只该补在缺图标的那一行，实际 " + all.length);
+      return "补了 1 行，未覆盖宿主图标";
+    },
+  });
+
+  // ── 0.2.2：横向条布局下不画行右端图标（会压字）──
+  scenarios.push({
+    name: "0.2.2 横向条布局：行右端不画图标，避免压住居中的标签",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      var list = navList();
+      assert(list, "没有导航列表");
+      // 宿主在 web 窄屏的写法：flex 行方向
+      list.style.display = "flex";
+      list.style.flexDirection = "row";
+      await enterEditing();
+      await sleep(120);
+      assert(list.getAttribute("data-snm-horizontal") === "1", "横向布局没被识别出来");
+      var cell = panelCells()[0];
+      var after = getComputedStyle(cell, "::after");
+      assert(after.display === "none", "横向布局下仍在画行右端图标（display=" + after.display + "）");
+      // 还原成竖排：标记必须撤掉，图标回来（先退出再进一次编辑模式触发重新同步）
+      list.style.flexDirection = "column";
+      await enterEditing();
+      await sleep(120);
+      await enterEditing();
+      await sleep(120);
+      assert(list.getAttribute("data-snm-horizontal") === null, "回到竖排后横向标记没撤掉");
+      var back = getComputedStyle(panelCells()[0], "::after");
+      assert(back.display !== "none", "回到竖排后图标没恢复");
+      return "横向隐藏 / 竖排恢复";
     },
   });
 

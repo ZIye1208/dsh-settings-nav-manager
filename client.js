@@ -98,6 +98,11 @@ window.__ModuleLoader__.load({
       // 属性必须与 DATA.pin 区分开，否则会被侧栏点击拦截器认成固定行）
       navPin: "data-snm-nav-pin",
       navPinState: "data-snm-nav-pin-state",
+      // 0.2.2 起宿主允许插件给分区补 16px 前置图标（settings.section.icon 槽）。
+      // 本标记打在我们补的图标上，用来区分「宿主的图标」和「我们的兜底图标」。
+      fallbackIcon: "data-snm-fallback-icon",
+      // 宿主把导航排成横向条时打在 navList 上（右端没有图标位，见 buildCss）
+      horizontal: "data-snm-horizontal",
     };
 
     // 行右侧的两段命中区（距行右边缘的像素）：0..ZONE_STAR 星标，ZONE_STAR..ZONE_EYE 眼睛。
@@ -139,6 +144,7 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         loadFailed: "未能读取已保存的排版，已暂停保存以免覆盖",
         loadRecovered: "已重新读取排版，保存已恢复",
         recognizeFailed: "导航结构变化，暂未应用整理",
+        iconFailed: "未能为分区补上图标",
         newGroup: "新抽屉",
         addGroup: "＋ 新建抽屉",
         dissolve: "解散抽屉",
@@ -185,6 +191,7 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         loadFailed: "Could not read the saved layout; saving is paused to avoid overwriting it",
         loadRecovered: "Saved layout re-read; saving resumed",
         recognizeFailed: "Navigation changed; layout not applied yet",
+        iconFailed: "Could not add a fallback icon to a section",
         newGroup: "New drawer",
         addGroup: "+ New drawer",
         dissolve: "Dissolve drawer",
@@ -769,6 +776,11 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         '[data-snm-editing="0"] [data-snm-row][data-snm-hidden="1"]{display:none;}',
         // 编辑模式：预留两颗图标位 + 标签截断
         '[data-snm-editing="1"] [data-snm-row]{padding-right:48px;}',
+        // 横向条布局：宿主只在 web 窄屏才把 .navList 改成 flex-direction:row，
+        // 这时 .navCell 是 flex:1 0 auto + 居中，右端没有图标位，画上去会压字。
+        // 归属由 applyDom 按实际计算样式打标记（桌面窗口恒为竖排 rail，不触发）。
+        '[data-snm-horizontal="1"][data-snm-editing="1"] [data-snm-row]{padding-right:12px;}',
+        '[data-snm-horizontal="1"][data-snm-editing="1"] [data-snm-row]::after{display:none;}',
         '[data-snm-editing="1"] [class*="navLabel"]{',
         "  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
         "  min-width:0;flex:1 1 auto;",
@@ -921,6 +933,10 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       var navNode = null;
       var lastFingerprint = "";
       var lastSectionsSig = "";
+      // 分区表的缓存键：ctx.slots.getVersion("settings.section") 变一次才重算
+      // projectSections + 重新认行（评审 DES-3）。宿主自己在设置弹窗里也是这么用的。
+      var lastSlotVersion = null;
+      var markCache = { ver: null, key: "", mapped: -1 };
       var rafId = 0;
       var cleanups = [];
       var timers = [];
@@ -1235,6 +1251,8 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       var pinDisposers = [];
       var pinSig = null;
       var clickHandler = null;
+      // 兜底分区图标的注册句柄：id → disposer（0.2.2 的 settings.section.icon）
+      var fallbackIconDisposers = Object.create(null);
 
       function disposePins() {
         while (pinDisposers.length) {
@@ -1594,6 +1612,7 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       function applyDom(nav) {
         nav.setAttribute(DATA.nav, "1");
         nav.setAttribute(DATA.editing, editing ? "1" : "0");
+        markOrientation(nav);
         var hiddenSet = dict();
         for (var k = 0; k < state.hidden.length; k++) hiddenSet[state.hidden[k]] = 1;
         var cellById = dict();
@@ -1649,17 +1668,79 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         buildTail(nav, counter);
       }
 
+      // 宿主给槽位注册表带版本号（settings-general 自己也是靠它做缓存的）。
+      // 老宿主没有这个方法时返回 null，退化成每次都算——正确性优先。
+      function slotsVersion() {
+        try {
+          var slots = ctx && ctx.slots;
+          if (!slots || typeof slots.getVersion !== "function") return null;
+          var v = slots.getVersion("settings.section");
+          return typeof v === "number" ? v : null;
+        } catch (e) {
+          dbg("slots version", e);
+          return null;
+        }
+      }
+
+      // 认行是纯 DOM 工作，与 state 无关：槽位版本 + 行的「数量+标签」指纹
+      // 都没变就没必要再走一遍 setAttribute（评审 DES-3）。
+      function markRowsCached(nav) {
+        if (!nav) return 0;
+        var key = fingerprint(nav);
+        if (
+          markCache.mapped >= 0 &&
+          markCache.ver === lastSlotVersion &&
+          markCache.key === key &&
+          nav.getAttribute(DATA.nav) === "1"
+        ) {
+          return markCache.mapped;
+        }
+        var mapped = markRows(nav);
+        markCache.ver = lastSlotVersion;
+        markCache.key = key;
+        markCache.mapped = mapped;
+        return mapped;
+      }
+
+      // 宿主 0.2.2 在 web 窄屏会把导航从左侧竖排 rail 切成横向条
+      // （.navList{flex-direction:row} + .navCell{flex:1 0 auto;padding:0 14px}），
+      // 那时行右端没有图标位。按实际计算样式打标记，而不是猜 html 上的宿主属性——
+      // 桌面窗口/测试台都不是横向，永远不该命中。
+      function isHorizontalNav(nav) {
+        try {
+          if (typeof getComputedStyle !== "function") return false;
+          var cs = getComputedStyle(nav);
+          if (!cs) return false;
+          var display = String(cs.display || "");
+          var dir = String(cs.flexDirection || "");
+          return display.indexOf("flex") === 0 && dir.indexOf("row") === 0;
+        } catch (e) {
+          dbg("orientation", e);
+          return false;
+        }
+      }
+      function markOrientation(nav) {
+        if (!nav || typeof nav.setAttribute !== "function") return;
+        if (isHorizontalNav(nav)) nav.setAttribute(DATA.horizontal, "1");
+        else if (nav.hasAttribute(DATA.horizontal)) nav.removeAttribute(DATA.horizontal);
+      }
+
       // ── 一次同步：投影 → 认行 → 归一化 → 应用 ──────────────────
       function sync() {
         if (disposed) return;
         ensureStyles();
-        sections = projectSections(ctx); // 永远先算，不看 DOM（P0）
+        // 分区表只有在宿主注册表版本变了才重算；否则沿用上一次的投影。
+        var ver = slotsVersion();
+        if (ver !== lastSlotVersion || !sections.length) {
+          lastSlotVersion = ver;
+          sections = projectSections(ctx); // 永远先算，不看 DOM（P0）
+        }
         // 入口页的行数据 = 这里的投影 + normalized state：两者都更新完再通知
         var sig = sectionsSignature(sections);
         var sigChanged = sig !== lastSectionsSig;
         lastSectionsSig = sig;
         var nav = findNav();
-        var mapped = nav ? markRows(nav) : 0;
+        var mapped = markRowsCached(nav);
         var total = nav ? navCells(nav).length : 0;
         state = normalizeState(state, knownIdsFrom(sections), sectionIds(sections));
         if (sigChanged) publish();
@@ -1670,6 +1751,9 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         if (!nav) return;
         // 尽力应用：认不全也要把认出来的排好，而不是整体不生效
         applyDom(nav);
+        // 0.2.2 起补「没有前置图标」的分区图标：必须在 applyDom 之后，
+        // 因为这一步要靠行标记（DATA.id）来判断哪一行缺图标。
+        syncFallbackIcons(nav);
         if (total > 0 && mapped < total && sections.length) {
           report("recognize", "unmapped rows " + mapped + "/" + total, "recognizeFailed");
         }
@@ -2552,6 +2636,10 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
           detachNavObserver();
           if (editing) setEditing(false);
           lastFingerprint = "";
+          // 面板关掉了：行标记会随宿主重渲染消失，缓存必须作废，否则重开时认行会被跳过
+          markCache.ver = null;
+          markCache.key = "";
+          markCache.mapped = -1;
           return;
         }
         attachNavObserver(nav);
@@ -2623,6 +2711,106 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
           h("path", { key: "l3", d: "M3 18h11" }),
           h("circle", { key: "c3", cx: 18.5, cy: 18, r: 2.5 }),
         );
+      }
+
+      // ── 0.2.2：给「没有前置图标」的分区补一枚 16px 图标 ─────────
+      // 0.2.2 起宿主在行里固定渲染 span.navIcon，并把 settings.section.icon
+      // 作为 list 槽喂给它（inline，fallback 是宿主自带的 navIcon(id)）。
+      // 我们只在那一格确实是空的时候注册，别人一旦补上就撤走——绝不抢图标。
+      function SectionFallbackIcon(props) {
+        var size = props && typeof props.size === "number" && props.size > 0 ? props.size : 16;
+        var active = !!(props && props.active);
+        return h(
+          "svg",
+          {
+            width: size,
+            height: size,
+            viewBox: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            strokeWidth: active ? 2 : 1.7,
+            strokeLinecap: "round",
+            strokeLinejoin: "round",
+            [DATA.fallbackIcon]: "1",
+            "aria-hidden": "true",
+            focusable: "false",
+            style: { display: "block", flex: "none" },
+          },
+          h("rect", { key: "r", x: 4, y: 4, width: 16, height: 16, rx: 3.5 }),
+          h("circle", { key: "d", cx: 12, cy: 12, r: 1.6, fill: "currentColor", stroke: "none" }),
+        );
+      }
+
+      // 行里的图标容器（0.2.2 是 span.navIcon；老宿主没有这一层 → 无处可补）
+      function navIconHost(cell) {
+        if (!cell || !cell.children) return null;
+        for (var i = 0; i < cell.children.length; i++) {
+          var el = cell.children[i];
+          var cls = el && el.className ? String(el.className) : "";
+          if (cls.indexOf("navIcon") >= 0) return el;
+        }
+        return null;
+      }
+      // 容器里已经有别人的图标（宿主自带的或第三方插件补的）就算「不缺」
+      function iconSlotTaken(host) {
+        if (!host || !host.children) return true;
+        for (var i = 0; i < host.children.length; i++) {
+          var el = host.children[i];
+          if (!el || typeof el.hasAttribute !== "function") return true;
+          if (!el.hasAttribute(DATA.fallbackIcon)) return true;
+        }
+        return false;
+      }
+
+      function syncFallbackIcons(nav) {
+        if (!nav || disposed) return;
+        if (!ctx || !ctx.slots || typeof ctx.slots.inject !== "function") return;
+        var cells = navCells(nav);
+        var want = Object.create(null);
+        for (var i = 0; i < cells.length; i++) {
+          var cell = cells[i];
+          var id = cell.getAttribute(DATA.id);
+          if (!id) continue;
+          var host = navIconHost(cell);
+          if (host && !iconSlotTaken(host)) want[id] = true;
+        }
+        // 谁自己把图标补上了，我们就把位置还回去
+        Object.keys(fallbackIconDisposers).forEach(function (id) {
+          if (want[id]) return;
+          var fn = fallbackIconDisposers[id];
+          delete fallbackIconDisposers[id];
+          try {
+            if (typeof fn === "function") fn();
+          } catch (e) {
+            dbg("fallback icon dispose", e);
+          }
+        });
+        Object.keys(want).forEach(function (id) {
+          if (fallbackIconDisposers[id]) return;
+          try {
+            fallbackIconDisposers[id] = ctx.slots.inject("settings.section.icon", function () {
+              return ctx.slots.register(
+                { name: "settings.section.icon", id: id, order: 0, locale: NS },
+                SectionFallbackIcon,
+              );
+            });
+          } catch (e) {
+            dbg("fallback icon register", e);
+            report("icon", e, "iconFailed");
+          }
+        });
+      }
+
+      function disposeFallbackIcons() {
+        Object.keys(fallbackIconDisposers).forEach(function (id) {
+          var fn = fallbackIconDisposers[id];
+          delete fallbackIconDisposers[id];
+          try {
+            if (typeof fn === "function") fn();
+          } catch (e) {
+            dbg("fallback icon dispose", e);
+          }
+        });
       }
 
       // ── 侧栏入口页：列出全部分区，点一行直达设置 ───────────────
@@ -3060,6 +3248,7 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
           if (rafId && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
           rafId = 0;
           disposePins(); // 固定行是动态注册的，得自己摘
+          disposeFallbackIcons(); // 兜底分区图标同理
           unbindPinClick();
           disposeEntry(); // 侧栏入口是动态注册的，得自己摘
           clearTimers(); // 轮询/重试的定时器全部作废
@@ -3079,6 +3268,7 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
             if (nav) {
               nav.removeAttribute(DATA.nav);
               nav.removeAttribute(DATA.editing);
+              nav.removeAttribute(DATA.horizontal);
               var injected = nav.querySelectorAll(
                 "[" + DATA.group + "],[" + DATA.addGroup + "],[" + DATA.reset + "]",
               );

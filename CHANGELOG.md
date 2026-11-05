@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.4.5
+
+适配 DSH Desktop **0.2.2-rc.1**，并把新版本给的两个能力用起来。0.2.2 的设置弹窗从「nav 里塞所有东西」改成了 grid 四块（`navTitle` / `nav` / `header` / `options`），齿轮槽搬进了 header —— 这些都是结构性变化，所以这版同时把测试台改成 0.2.2 的真结构。
+
+### 兼容性
+
+- **已实测兼容 DSH Desktop `0.2.2-rc.1`**：逐项核对 `dsh-client-ui-settings-general`（83917B，rc.3 为 59835B）、`dsh-client-ui-sidebar`、`dsh-client-ui-layout` 的新实现——`sidebar.settings` 槽仍带单例 store 与 `openSection`（深链 ① 依旧成立）、`settings.action` 槽仍在（位置从 nav 内改到 header）、`settings.section` 的 `id/order/label` 投影与 `getVersion` 缓存用法未变、`[data-shortcut-modal="settings"]` 与 `navList`/`navCell`/`navLabel` 仍在使用且 `.navCell` 定位 CSS 逐字相同、`PanelRow`+`entriesOfSlot("sidebar.panellist")` 与 `selectPanel → layout.selectPanel` 的报错文案未变、`ctx.remote.settings` 的 `describe/update/replace/mutate` 未变。`dsh-client-ui-renderer` 哈希与 rc.3 完全一致（槽位引擎未动）。
+- 兼容范围仍是 `>=0.2.1-rc.2 <0.3.0`。
+
+### 新增
+
+- **给没有前置图标的分区补一枚 16px 图标**：0.2.2 新增了 `settings.section.icon` 槽（`list` / `root` / `inline`，宿主把 fallback 设为它自己的 `navIcon(id)`）。本插件只在那一格确实是空的时候注册，一旦别人把图标补上就立刻撤走——绝不抢宿主或第三方插件的图标。
+- **识别横向条布局**：0.2.2 在 web 窄屏会把导航改成横向条（`flex-direction:row`、`.navCell{flex:1 0 auto;padding:0 14px}`），行右端没有图标位。现在按实际计算样式打 `data-snm-horizontal` 标记，只在横向时收起两颗图标，避免压住居中的标签（桌面窗口恒为竖排 rail，不会触发）。
+
+### 优化
+
+- **分区表按槽位版本缓存**（评审 DES-3）：用 `ctx.slots.getVersion("settings.section")` 做键，版本没变就不重算分区投影；认行也加了「槽位版本 + 行数量/标签指纹」的缓存，DOM 没变时不再逐行 `setAttribute`。宿主自己的设置弹窗也是这么用的。
+
+### 测试
+
+- 测试台按 0.2.2 真结构重写：`panel > [div.navTitle, nav > div.navList, div.header > (div.actions + button.close), div.options]`，行内是 `span.navIcon` + `span.navLabel`。
+- 单测 44 条不变，仓库校验 16 条不变；**e2e 36 → 39 条**，新增：
+  - 「0.2.2 结构（title/nav/header/options + navIcon 包裹层）仍能认全每一行」；
+  - 「0.2.2 图标槽：空图标行补兜底图标，宿主已有字形的不抢」；
+  - 「0.2.2 横向条布局：行右端不画图标，避免压住居中的标签」。
+  - 三条均标 `oldFails`，在 1.4.4 的 `client.js` 上实测失败（39 条里 3 条失败），证明断言有效。
+
 ## 1.4.4
 
 评审 D-1 / D-2 的修复。这两条都属于「静默丢数据」：用户看不到任何异常，重启后排版就没了，而且消失的那次写盘是「成功」的，连失败提示都没有。

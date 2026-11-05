@@ -18,3 +18,6 @@ _npmcache/
 
 # 发版用的临时笔记
 _rel*.md
+
+# 设计文档统一放工作区 _tools/docs/，本仓库不跟踪
+docs/

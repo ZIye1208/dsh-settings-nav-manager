@@ -18,6 +18,7 @@
   "loadFailed": "Could not read the saved layout; saving is paused to avoid overwriting it",
   "loadRecovered": "Saved layout re-read; saving resumed",
   "recognizeFailed": "Navigation changed; layout not applied yet",
+  "iconFailed": "Could not add a fallback icon to a section",
   "newGroup": "New drawer",
   "addGroup": "+ New drawer",
   "dissolve": "Dissolve drawer",
