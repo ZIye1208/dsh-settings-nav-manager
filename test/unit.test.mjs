@@ -414,6 +414,15 @@ test("flattenNav：同一个 id 在 order 里出现两次也只渲染一行", ()
   );
 });
 
+test("sectionsKey：投影缓存键必须同时跟着槽位版本和界面语言版本走", () => {
+  // 宿主的分区 label 是 `() => t("general.nav")`：切语言时标签整批变，
+  // 但槽位注册表版本不变。只认槽位版本就会留下旧语言的投影（1.4.5 的回归）。
+  assert.equal(T.sectionsKey(7, 1), T.sectionsKey(7, 1), "同槽位版本同语言版本必须命中缓存");
+  assert.notEqual(T.sectionsKey(7, 1), T.sectionsKey(7, 2), "语言版本变了必须重算");
+  assert.notEqual(T.sectionsKey(7, 1), T.sectionsKey(8, 1), "槽位版本变了必须重算");
+  assert.notEqual(T.sectionsKey(null, null), T.sectionsKey(null, 1), "拿不到版本号时也不能撞同一个键");
+});
+
 test("glyphOf：按码点取首字，中文与 emoji 都不会被截断", () => {
   assert.equal(T.glyphOf("通用设置"), "通");
   assert.equal(T.glyphOf("🤖 模型"), "🤖");

@@ -7,13 +7,33 @@
   "use strict";
 
   var SECTIONS = [
-    { id: "general", order: 0, label: "通用" },
-    { id: "account", order: 1, label: "账户" },
-    { id: "models", order: 2, label: "模型", noIcon: true },
-    { id: "plugins", order: 3, label: "插件" },
+    { id: "general", order: 0, label: "通用", en: "General" },
+    { id: "account", order: 1, label: "账户", en: "Account" },
+    { id: "models", order: 2, label: "模型", en: "Models", noIcon: true },
+    { id: "plugins", order: 3, label: "插件", en: "Plugins" },
     // 0.2.2 的形状：行里始终有 span.navIcon，但宿主没有自带字形 → 空容器
-    { id: "pet", order: 4, label: "桌宠配置", emptyIcon: true },
+    { id: "pet", order: 4, label: "桌宠配置", en: "Pet", emptyIcon: true },
   ];
+
+  // 真实的宿主 label 是 `() => t("general.nav")`：切界面语言时标签会变，
+  // 但槽位注册表版本不变。这里照抄这个性质，才能测出「投影缓存漏了语言版本」。
+  var localeState = { lang: "zh", revision: 1 };
+  var localeSubs = [];
+  function sectionLabel(sec) {
+    return localeState.lang === "zh" ? sec.label : sec.en;
+  }
+  function bumpLocale() {
+    localeState.lang = localeState.lang === "zh" ? "en" : "zh";
+    localeState.revision += 1;
+    var subs = localeSubs.slice();
+    for (var i = 0; i < subs.length; i++) {
+      try {
+        subs[i]();
+      } catch (e) {
+        /* 订阅方自己报错不影响其它订阅 */
+      }
+    }
+  }
   // 磁盘上「上次保存」的排版：拖过序、有抽屉、隐藏了一项
   var SAVED = {
     version: 1,
@@ -332,7 +352,7 @@
         if (!sec.emptyIcon) {
           var glyph = document.createElement("span");
           glyph.className = "xx_glyph";
-          glyph.textContent = sec.label.slice(0, 1);
+          glyph.textContent = sectionLabel(sec).slice(0, 1);
           icon.appendChild(glyph);
         }
         btn.appendChild(icon);
@@ -340,7 +360,7 @@
       var label = document.createElement("span");
       label.className = "xx_navLabel";
       // rowLabel 可以跟注册的 label 不同：真机上宿主会加后缀/截断（「插件市场设置」显示成「插件市场」）
-      label.textContent = sec.rowLabel || sec.label;
+      label.textContent = sec.rowLabel || sectionLabel(sec);
       btn.appendChild(label);
       btn.addEventListener("click", function () {
         if (env.shell && env.shell.dead) return; // 假装宿主这次点了没反应
@@ -483,6 +503,9 @@
   }
 
   // 宿主侧栏：按 order 稳定排序后渲染，点行 → selectPanel(id)
+  // 0.2.2-rc.3 的行结构是 div.panelEntry > button.panelRow > span.panelGlyph
+  //（图标经 `sidebar.panel.icon` factory 槽间接渲染 `sidebar.panellist`），
+  // 这里照抄，才能守住「插件把标记打在哪一层」这个契约。
   function mountSidebar() {
     var bar = chrome().bar;
     var sorted = regs["sidebar.panellist"].slice().sort(function (a, b) {
@@ -490,24 +513,29 @@
     });
     bar.textContent = "";
     sorted.forEach(function (rec) {
+      var entry = document.createElement("div");
+      entry.className = "xx_panelEntry panelEntry";
+      entry.setAttribute("data-panel-entry", rec.spec.id);
       var btn = document.createElement("button");
       btn.type = "button";
       btn.className = "xx_panelRow panelRow";
       btn.setAttribute("data-panel-id", rec.spec.id);
-      var icon = document.createElement("span");
-      icon.className = "xx_panelIcon";
-      btn.appendChild(icon);
+      var glyph = document.createElement("span");
+      glyph.className = "xx_panelGlyph panelGlyph";
+      glyph.setAttribute("aria-hidden", "true");
+      btn.appendChild(glyph);
       var title = document.createElement("span");
-      title.className = "xx_panelTitle";
+      title.className = "xx_panelTitle panelTitle";
       var label = rec.spec.label;
       title.textContent = typeof label === "function" ? String(label()) : String(label || rec.spec.id);
       btn.appendChild(title);
       btn.addEventListener("click", function () {
         selectPanel(rec.spec.id);
       });
-      bar.appendChild(btn);
+      entry.appendChild(btn);
+      bar.appendChild(entry);
       // 图标在真机上也是独立组件（宿主单独渲染），这里同样真挂一次
-      if (typeof rec.Component === "function") mountInto("icon:" + rec.spec.id, icon, rec.Component);
+      if (typeof rec.Component === "function") mountInto("icon:" + rec.spec.id, glyph, rec.Component);
     });
   }
 
@@ -617,6 +645,17 @@
           delete localeDicts[ns];
         };
       },
+      // 宿主真实的 locale 服务还带 revision + 订阅：分区 label 变了靠这个通知
+      getSnapshot: function () {
+        return { revision: localeState.revision, lang: localeState.lang };
+      },
+      subscribe: function (fn) {
+        localeSubs.push(fn);
+        return function () {
+          var i = localeSubs.indexOf(fn);
+          if (i >= 0) localeSubs.splice(i, 1);
+        };
+      },
     };
   }
 
@@ -630,7 +669,16 @@
       slots: {
         entries: function () {
           return SECTIONS.map(function (s) {
-            return { options: { id: s.id, order: s.order, label: s.label } };
+            // 与宿主一致：label 是函数，调用时才解析当前语言
+            return {
+              options: {
+                id: s.id,
+                order: s.order,
+                label: function () {
+                  return sectionLabel(s);
+                },
+              },
+            };
           });
         },
         // 设置 shell 把「活实例」暴露在这里，插件的深链走这条路
@@ -747,6 +795,10 @@
     effectRan = {};
     mounted.Component = null;
     mounted.container = null;
+    // 语言状态是宿主侧的，跨场景必须复位，否则上一场景切到英文会污染下一场景
+    localeState.lang = "zh";
+    localeState.revision = 1;
+    localeSubs = [];
   }
 
   async function enterEditing() {
@@ -1752,6 +1804,85 @@
       var back = getComputedStyle(panelCells()[0], "::after");
       assert(back.display !== "none", "回到竖排后图标没恢复");
       return "横向隐藏 / 竖排恢复";
+    },
+  });
+
+  // ── 0.2.2-rc.3：侧栏行多了一层 div.panelEntry，标记必须落在 button 上 ──
+  scenarios.push({
+    name: "0.2.2-rc.3 侧栏：行被 div.panelEntry 包一层，固定标记仍落在 button.panelRow 上",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await sleep(150);
+      sidebarRow(PLUGIN_ID).click();
+      await sleep(120);
+      var page = document.querySelector("[data-snm-page]");
+      assert(page, "入口页没渲染");
+      var pin = pinBtnOf(page, "models");
+      assert(pin, "入口页没有「模型」那一行的固定按钮");
+      pin.click();
+      await sleep(220);
+      var btn = sidebarRow("snm-pin-models");
+      assert(btn, "固定后侧栏没有那一行");
+      assert(btn.tagName === "BUTTON", "固定行不是 button，而是 " + btn.tagName);
+      var wrapper = btn.closest("[data-panel-entry]");
+      assert(wrapper, "测试台没按 rc.3 结构包 div.panelEntry");
+      assert(
+        btn.getAttribute("data-snm-pin") === "models",
+        "固定标记没落在 button 上：" + btn.getAttribute("data-snm-pin"),
+      );
+      assert(!wrapper.hasAttribute("data-snm-pin"), "标记错打到外层 div.panelEntry 上了");
+      // 点这一行：仍然直达设置，主面板不切走（拦截器只认 button 上的标记）
+      var panelBefore = env.panel;
+      btn.click();
+      await sleep(400);
+      assert(env.shell.calls.indexOf("models") >= 0, "点固定行没走深链：" + JSON.stringify(env.shell.calls));
+      assert(env.panel === panelBefore, "主面板被切走了：" + env.panel);
+      return "标记在 button 上，点击直达设置";
+    },
+  });
+
+  // ── 0.2.2-rc.3：界面语言切换，分区标签跟着变（不重启） ──
+  scenarios.push({
+    name: "界面语言切换：入口页标签立刻跟着变，重开弹窗后仍能认全行",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await sleep(150);
+      sidebarRow(PLUGIN_ID).click();
+      await sleep(120);
+      assert(document.querySelector("[data-snm-page]"), "入口页没渲染");
+      function pageLabelOf(id) {
+        var rows = document.querySelectorAll("[data-snm-page-row]");
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].getAttribute("data-snm-page-id") === id) return rows[i].textContent;
+        }
+        return "";
+      }
+      assert(pageLabelOf("models").indexOf("模型") >= 0, "初始语言就不对：" + pageLabelOf("models"));
+      // 宿主切语言：label 是 t() 现算的，槽位注册表版本不变，只有 locale revision 变
+      bumpLocale();
+      await sleep(220);
+      assert(
+        pageLabelOf("models").indexOf("Models") >= 0,
+        "切语言后入口页仍是旧标签（投影缓存漏了语言版本）：" + pageLabelOf("models"),
+      );
+      assert(pageLabelOf("general").indexOf("General") >= 0, "别的行也没跟上：" + pageLabelOf("general"));
+      // 宿主整树重渲染后（DOM 标签变英文），行还得认全
+      var stale = panelEl();
+      if (stale) stale.remove();
+      await openPanel();
+      await sleep(220);
+      var cells = panelCells();
+      var marked = 0;
+      for (var c = 0; c < cells.length; c++) {
+        if (cells[c].getAttribute("data-snm-row") === "1") marked++;
+      }
+      assert(marked === cells.length, "新语言下没认全行：" + marked + "/" + cells.length);
+      return "标签随语言更新，认行仍然有效";
     },
   });
 

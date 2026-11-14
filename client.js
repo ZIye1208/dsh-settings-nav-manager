@@ -382,6 +382,12 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       return parts.join("\u0002");
     }
 
+    // 投影缓存键：槽位注册表版本 + 界面语言版本。分区 label 由宿主用 t() 现算，
+    // 切语言时只有 locale revision 会变；只认槽位版本就会留下旧语言的投影。
+    function sectionsKey(slotVer, localeRev) {
+      return String(slotVer) + "@" + String(localeRev);
+    }
+
     // 行的首字徽标：按码点取首字符（emoji/中文都不会被截成半个代理对）
     function glyphOf(label) {
       var s = label === undefined || label === null ? "" : String(label);
@@ -933,8 +939,8 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       var navNode = null;
       var lastFingerprint = "";
       var lastSectionsSig = "";
-      // 分区表的缓存键：ctx.slots.getVersion("settings.section") 变一次才重算
-      // projectSections + 重新认行（评审 DES-3）。宿主自己在设置弹窗里也是这么用的。
+      // 分区表的缓存键：槽位注册表版本 + 界面语言版本，任一变了才重算
+      // projectSections + 重新认行（评审 DES-3）。宿主自己的设置弹窗也是这么用的。
       var lastSlotVersion = null;
       var markCache = { ver: null, key: "", mapped: -1 };
       var rafId = 0;
@@ -1469,6 +1475,34 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         clickHandler = null;
       }
 
+      // 语言切换：宿主换掉 label 后我们得重算投影并重认行，否则按标签比对会全错。
+      // subscribe 的返回是退订函数；老宿主没有 subscribe 时静默跳过（正确性不受影响，
+      // 只是要等下一次别的同步时机）。
+      var localeOff = null;
+      function bindLocale() {
+        if (localeOff) return;
+        try {
+          var loc = ctx && ctx.locale;
+          if (!loc || typeof loc.subscribe !== "function") return;
+          localeOff = loc.subscribe(function () {
+            if (!disposed) sync();
+          });
+        } catch (e) {
+          dbg("locale subscribe", e);
+          localeOff = null;
+        }
+      }
+      function unbindLocale() {
+        if (!localeOff) return;
+        var off = localeOff;
+        localeOff = null;
+        try {
+          if (typeof off === "function") off();
+        } catch (e) {
+          dbg("locale unsubscribe", e);
+        }
+      }
+
       function ensureStyles() {
         if (!document || !document.head) return;
         if (styleEl && styleEl.parentNode) return;
@@ -1668,6 +1702,22 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         buildTail(nav, counter);
       }
 
+      // 语言版本号：分区 label 是宿主用 t() 现算的（`label: () => t("general.nav")`），
+      // 切界面语言时标签会变，但槽位注册表版本不变。宿主自己的 useSections 就是
+      // 用「槽位版本 + locale revision」两个键做缓存的，漏了会留下旧语言的投影，
+      // 后果是认行按标签比对全错、入口页显示旧语言（1.4.5 的回归）。
+      function localeRevision() {
+        try {
+          var loc = ctx && ctx.locale;
+          if (!loc || typeof loc.getSnapshot !== "function") return null;
+          var snap = loc.getSnapshot();
+          var rev = snap ? snap.revision : undefined;
+          return typeof rev === "number" ? rev : null;
+        } catch (e) {
+          dbg("locale revision", e);
+          return null;
+        }
+      }
       // 宿主给槽位注册表带版本号（settings-general 自己也是靠它做缓存的）。
       // 老宿主没有这个方法时返回 null，退化成每次都算——正确性优先。
       function slotsVersion() {
@@ -1681,8 +1731,12 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
           return null;
         }
       }
+      // 投影缓存键 = 槽位版本 + 语言版本（任一变就要重算 sections）
+      function sectionsCacheKey() {
+        return sectionsKey(slotsVersion(), localeRevision());
+      }
 
-      // 认行是纯 DOM 工作，与 state 无关：槽位版本 + 行的「数量+标签」指纹
+      // 认行是纯 DOM 工作，与 state 无关：投影缓存键 + 行的「数量+标签」指纹
       // 都没变就没必要再走一遍 setAttribute（评审 DES-3）。
       function markRowsCached(nav) {
         if (!nav) return 0;
@@ -1729,10 +1783,10 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       function sync() {
         if (disposed) return;
         ensureStyles();
-        // 分区表只有在宿主注册表版本变了才重算；否则沿用上一次的投影。
-        var ver = slotsVersion();
-        if (ver !== lastSlotVersion || !sections.length) {
-          lastSlotVersion = ver;
+        // 分区表只有「槽位版本 + 界面语言版本」变了才重算；否则沿用上一次的投影。
+        var key = sectionsCacheKey();
+        if (key !== lastSlotVersion || !sections.length) {
+          lastSlotVersion = key;
           sections = projectSections(ctx); // 永远先算，不看 DOM（P0）
         }
         // 入口页的行数据 = 这里的投影 + normalized state：两者都更新完再通知
@@ -2590,6 +2644,9 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         document.addEventListener("visibilitychange", bl);
         // 侧栏固定行的点击拦截独立注册：编辑模式关闭时也要生效
         bindPinClick();
+        // 界面语言变了，分区 label 会整批换掉（宿主 label 是 t() 现算的）：
+        // 不订阅就只能等到设置弹窗本身重渲染才偶然跟上，入口页会一直显示旧语言。
+        bindLocale();
         cleanups.push(function () {
           document.removeEventListener("pointerdown", pd, true);
           document.removeEventListener("pointermove", pm, true);
@@ -3249,6 +3306,7 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
           rafId = 0;
           disposePins(); // 固定行是动态注册的，得自己摘
           disposeFallbackIcons(); // 兜底分区图标同理
+          unbindLocale(); // 语言订阅
           unbindPinClick();
           disposeEntry(); // 侧栏入口是动态注册的，得自己摘
           clearTimers(); // 轮询/重试的定时器全部作废
@@ -3318,6 +3376,7 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       sectionIds: sectionIds,
       flattenNav: flattenNav,
       sectionsSignature: sectionsSignature,
+      sectionsKey: sectionsKey,
       glyphOf: glyphOf,
       pinnedIds: pinnedIds,
       togglePinnedState: togglePinnedState,

@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.4.6
+
+适配 DSH Desktop **0.2.2-rc.3**，并修掉 1.4.5 引入的一个缓存 bug（切换界面语言后分区标签不更新）。
+
+### 兼容性
+
+- **已实测兼容 DSH Desktop `0.2.2-rc.3`**：逐项核对了 `dsh-client-ui-settings-general`（89937B）、`dsh-client-ui-sidebar`（41887B）、`dsh-client-ui-layout`（25883B）与 renderer——设置弹窗结构（`data-shortcut-modal="settings"` / `navTitle` / `nav.nav>div.navList` / `header>div.actions` / `options`）、`.navCell` 定位 CSS（`height:40px; padding:9px 16px 9px 12px`）、`settings.section` 投影与 `settings.section.icon` 槽、`sidebar.settings` 单例 store 与 `openSection`、`main` keyed 槽与 `retainMainPanels`、`selectPanel` 报错文案、`remote.settings` 的 `describe/update/replace/mutate` **全部未变**；schemastery 3.19.0 满足 `^3.18.4`。
+- 兼容范围仍是 `>=0.2.1-rc.2 <0.3.0`。
+- rc.3 的侧栏行多了一层 `div.panelEntry`（`button.panelRow` 被包进去），图标改由 `sidebar.panel.icon` factory 槽间接渲染 `sidebar.panellist`。本插件的行图标与点击拦截都锚在 `button[class*="panelRow"]` 上，因此不受影响；测试台已按这个结构同步，并加了回归用例。
+
+### 修复
+
+- **切换界面语言后分区标签不更新**（1.4.5 的回归）：分区 `label` 是宿主用 `t()` 现算的，切语言时标签整批变，但槽位注册表版本不变。1.4.5 的投影缓存只认槽位版本，于是保留了旧语言的投影——表现为入口页显示旧语言、认行时按标签比对全错、固定行标题停留在旧语言。现在缓存键改成「槽位版本 + `ctx.locale.getSnapshot().revision`」（宿主自己的 `useSections` 也是这么做的），并订阅 `ctx.locale`，语言一变立即重算投影并重认行。
+
+### 测试
+
+- **单测 44 → 45 条**（新增 `sectionsKey` 用例：语言版本变、槽位版本变、拿不到版本号都不能撞进同一个键），仓库校验 16 条不变。
+- **e2e 39 → 41 条**，新增两条：
+  - 「界面语言切换：入口页标签立刻跟着变，重开弹窗后仍能认全行」——标 `oldFails`，在 1.4.5 的 `client.js` 上实测失败（报「切语言后入口页仍是旧标签（投影缓存漏了语言版本）」），证明断言有效；
+  - 「0.2.2-rc.3 侧栏：行被 `div.panelEntry` 包一层，固定标记仍落在 `button.panelRow` 上」——守住「标记打在哪一层」这个契约，防止以后有人把 `closest()` 改成会命中外层容器。
+
 ## 1.4.5
 
 适配 DSH Desktop **0.2.2-rc.1**，并把新版本给的两个能力用起来。0.2.2 的设置弹窗从「nav 里塞所有东西」改成了 grid 四块（`navTitle` / `nav` / `header` / `options`），齿轮槽搬进了 header —— 这些都是结构性变化，所以这版同时把测试台改成 0.2.2 的真结构。
