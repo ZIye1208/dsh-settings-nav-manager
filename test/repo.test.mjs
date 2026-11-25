@@ -90,7 +90,15 @@ test("源码卫生：集合容器必须无原型（避免 id 撞 constructor/__p
 
 test("健壮性：拖拽中断与冲突处理的关键代码在", () => {
   assert.ok(SRC.includes('"pointercancel"'), "缺少 pointercancel 兜底");
-  assert.ok(SRC.includes("SETTINGS_CONFLICT"), "缺少设置冲突处理");
+  assert.ok(SRC.includes("settings/conflict"), "缺少当前 DSH 的真实冲突错误码");
+  assert.ok(SRC.includes("SETTINGS_CONFLICT"), "缺少旧版 DSH 冲突码兼容");
+  assert.ok(SRC.includes("saveTail"), "缺少串行保存队列");
+  assert.ok(SRC.includes("mergeSaveState"), "缺少冲突三方合并");
+  assert.ok(SRC.includes("remapCollidingLocalGroups"), "缺少并发同 id 抽屉改 id 保护");
+  assert.ok(SRC.includes("settings/revision-missing"), "缺少 revision 缺失失败关闭");
+  assert.ok(SRC.includes("withTimeout"), "缺少 settings RPC 超时");
+  assert.ok(SRC.includes("layoutIntent"), "缺少用户布局意图与自动归一化分离");
+  assert.ok(SRC.includes("mergePinned"), "缺少 pinned 上限并发保护");
   assert.ok(SRC.includes("if (!known") || SRC.includes("countKeys(known) === 0"), "缺少「分区未知不裁剪」的守卫");
 });
 

@@ -80,6 +80,11 @@
       rejectAll: !!opts.rejectAll,
       rejectCode: opts.rejectCode || "gateway/internal",
       rejectMessage: opts.rejectMessage || "rejected",
+      delayUpdateMs: opts.delayUpdateMs || 0,
+      omitWriteRevision: !!opts.omitWriteRevision,
+      missingUpdateOnce: !!opts.missingUpdateOnce,
+      conflictMutateOnce: !!opts.conflictMutateOnce,
+      advanceWriteValueOnce: (opts.advanceWriteValueOnce || []).slice(),
       aliasNs: opts.aliasNs || null,
       schema: opts.schema || null,
     };
@@ -126,23 +131,54 @@
       if (st.rejectAll || st.rejectMethod === method) {
         return Promise.resolve({ ok: false, error: { code: st.rejectCode, message: st.rejectMessage } });
       }
+      if (method === "update" && st.missingUpdateOnce) {
+        st.missingUpdateOnce = false;
+        return Promise.resolve({ ok: false, error: { code: "NO_SUCH_NS", message: "entry missing" } });
+      }
+      if (method === "mutate" && st.conflictMutateOnce) {
+        st.conflictMutateOnce = false;
+        st.revision++;
+        return Promise.resolve({ ok: false, error: { code: "settings/conflict", message: "revision mismatch" } });
+      }
       if (st.failNext) {
         var f = st.failNext;
         st.failNext = null;
         return Promise.resolve({ ok: false, error: { code: f.code || "gateway/internal", message: f.message || "boom" } });
       }
       if (typeof expected === "number" && expected !== st.revision) {
-        return Promise.resolve({ ok: false, error: { code: "SETTINGS_CONFLICT", message: "revision mismatch" } });
+        // 与当前 DSH Gateway/settings-controller 的真实对外错误码一致。
+        return Promise.resolve({ ok: false, error: { code: "settings/conflict", message: "revision mismatch" } });
       }
       st.value = build();
+      if (st.advanceWriteValueOnce.length) {
+        // 模拟宿主规范化或并发推进：本次写回执携带比写入快照更完整的落盘态。
+        var advanced = clone(st.value) || { version: 1, order: [], groups: [], hidden: [] };
+        var hiddenIds = Array.isArray(advanced.hidden) ? advanced.hidden.slice() : [];
+        st.advanceWriteValueOnce.forEach(function (id) {
+          if (hiddenIds.indexOf(id) < 0) hiddenIds.push(id);
+        });
+        advanced.hidden = hiddenIds;
+        st.value = advanced;
+        st.advanceWriteValueOnce = [];
+      }
       st.writes.push({ method: method, ns: ns, value: clone(st.value) });
       st.revision++;
-      return Promise.resolve({
-        ok: true,
-        value: { ns: st.aliasNs || "settings-nav-manager", value: clone(st.value), revision: st.revision },
-      });
+      var response = { ok: true, value: { ns: st.aliasNs || "settings-nav-manager", value: clone(st.value) } };
+      if (!st.omitWriteRevision) response.value.revision = st.revision;
+      return Promise.resolve(response);
     }
     st.update = function (ns, patch, expected) {
+      if (st.delayUpdateMs > 0) {
+        var delay = st.delayUpdateMs;
+        st.delayUpdateMs = 0;
+        return new Promise(function (resolve) {
+          setTimeout(function () {
+            resolve(settle("update", expected, function () {
+              return clone(patch);
+            }, ns));
+          }, delay);
+        });
+      }
       return settle("update", expected, function () {
         return clone(patch);
       }, ns);
@@ -1214,6 +1250,230 @@
         "重放时仍未携带 revision",
       );
       return "尝试 " + env.store.attempts.length + " 次，最终 rev=" + env.store.revision;
+    },
+  });
+
+  scenarios.push({
+    name: "并发保存：快速连续两次显隐必须串行且保留两次操作",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3, { delayUpdateMs: 140 });
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var general = cellBySection("general");
+      var models = cellBySection("models");
+      var gr = general.getBoundingClientRect();
+      var mr = models.getBoundingClientRect();
+      clickAt(general, gr.right - DX_EYE, gr.top + gr.height / 2);
+      clickAt(models, mr.right - DX_EYE, mr.top + mr.height / 2);
+      await sleep(30);
+      assert(
+        env.store.attempts.length === 0,
+        "第一次保存尚未落盘时就出现了写入尝试（队列未串行）：" + env.store.attempts.length,
+      );
+      await sleep(260);
+      var hidden = (env.store.value || {}).hidden || [];
+      assert(hidden.indexOf("general") >= 0 && hidden.indexOf("models") >= 0, "旧快照覆盖了新操作：" + JSON.stringify(hidden));
+      assert(hidden.indexOf("plugins") >= 0, "原有隐藏项被丢了");
+      return "attempts=" + env.store.attempts.length + "，hidden=" + JSON.stringify(hidden);
+    },
+  });
+
+  scenarios.push({
+    name: "并发冲突：合并另一窗口的独立显隐改动",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      // 另一窗口在本地操作前提交了 account 的显隐变化。
+      env.store.value.hidden = ["plugins", "account"];
+      env.store.revision++;
+      var cell = cellBySection("models");
+      var r = cell.getBoundingClientRect();
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
+      await sleep(250);
+      var hidden = (env.store.value || {}).hidden || [];
+      assert(hidden.indexOf("account") >= 0, "远端独立改动被覆盖：" + JSON.stringify(hidden));
+      assert(hidden.indexOf("models") >= 0, "本地改动未保存：" + JSON.stringify(hidden));
+      assert(env.store.attempts.length >= 2, "没有发生冲突重读/重试");
+      return "hidden=" + JSON.stringify(hidden);
+    },
+  });
+
+  scenarios.push({
+    name: "并发冲突：双窗口同建 g-1 时不得覆盖远端抽屉",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      env.store.value.groups = [{ id: "g-1", name: "远端抽屉", collapsed: false, items: ["models"] }];
+      env.store.value.order = ["general", "g-1", "account", "models", "plugins", "pet"];
+      env.store.revision++;
+      var addBtn = document.querySelector("[data-snm-add-group]");
+      assert(addBtn, "编辑模式下未出现「新建抽屉」");
+      addBtn.click();
+      await sleep(300);
+      var groups = env.store.value.groups || [];
+      assert(groups.length === 2, "同 id 抽屉被覆盖：" + JSON.stringify(groups));
+      assert(groups[0].id === "g-1", "远端抽屉 id 被改写");
+      assert(groups[0].name === "远端抽屉", "远端抽屉内容被覆盖");
+      assert(groups[1].id === "g-2", "本地冲突抽屉没有改 id");
+      assert(env.store.value.order.indexOf("g-1") >= 0 && env.store.value.order.indexOf("g-2") >= 0, "order 未同时保留两个抽屉");
+      return "groups=" + JSON.stringify(groups.map(function (g) { return g.id + ":" + g.name; }));
+    },
+  });
+
+  scenarios.push({
+    name: "并发冲突：同一抽屉分别加入不同成员时保留双方新增",
+    oldFails: true,
+    run: async function () {
+      var initial = {
+        version: 1,
+        order: ["general", "g-1", "account", "models", "plugins", "pet"],
+        groups: [{ id: "g-1", name: "常用", collapsed: false, items: ["general"] }],
+        hidden: ["plugins"],
+        pinned: [],
+      };
+      env.store = makeStore(initial, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      env.store.value.groups[0].items = ["general", "models"];
+      env.store.revision++;
+      var from = cellBySection("account");
+      var header = document.querySelector('[data-snm-group][data-snm-group-id="g-1"]');
+      assert(from && header, "缺少可拖拽行或抽屉头");
+      var fr = from.getBoundingClientRect();
+      var hr = header.getBoundingClientRect();
+      var x = fr.left + 40;
+      pointer("pointerdown", from, x, fr.top + fr.height / 2);
+      pointer("pointermove", from, x, fr.top + fr.height / 2 + 20);
+      await sleep(40);
+      pointer("pointermove", from, x, hr.top + hr.height / 2);
+      await sleep(60);
+      pointer("pointerup", from, x, hr.top + hr.height / 2);
+      await sleep(260);
+      var items = env.store.value.groups[0].items || [];
+      assert(items.indexOf("account") >= 0, "本地新增成员丢失：" + JSON.stringify(items));
+      assert(items.indexOf("models") >= 0, "远端并发新增成员被覆盖：" + JSON.stringify(items));
+      return "items=" + JSON.stringify(items);
+    },
+  });
+
+  scenarios.push({
+    name: "并发边界：写回执推进落盘态时对齐内存，下一次保存不得覆盖",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3, { delayUpdateMs: 140, advanceWriteValueOnce: ["account"] });
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var general = cellBySection("general");
+      var models = cellBySection("models");
+      var gr = general.getBoundingClientRect();
+      var mr = models.getBoundingClientRect();
+      clickAt(general, gr.right - DX_EYE, gr.top + gr.height / 2);
+      // 第一个写入尚未返回时继续本地操作；其回执又会带回 account 的并发推进。
+      clickAt(models, mr.right - DX_EYE, mr.top + mr.height / 2);
+      await sleep(360);
+      var hidden = (env.store.value || {}).hidden || [];
+      assert(hidden.indexOf("general") >= 0 && hidden.indexOf("models") >= 0, "本地两次操作未保留：" + JSON.stringify(hidden));
+      assert(hidden.indexOf("account") >= 0, "写回执中的并发推进被下一次保存覆盖：" + JSON.stringify(hidden));
+      assert(env.store.writes.length === 2, "队列没有完成第二次保存：" + env.store.writes.length);
+      return "writes=" + env.store.writes.length + "，hidden=" + JSON.stringify(hidden);
+    },
+  });
+
+  scenarios.push({
+    name: "并发边界：写响应缺 revision 后拒绝继续盲写",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3, { omitWriteRevision: true, delayUpdateMs: 140 });
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var general = cellBySection("general");
+      var models = cellBySection("models");
+      var gr = general.getBoundingClientRect();
+      var mr = models.getBoundingClientRect();
+      clickAt(general, gr.right - DX_EYE, gr.top + gr.height / 2);
+      // 第二个任务在前一个写回执返回前入队，复现「入队时有 revision、执行时已置空」。
+      clickAt(models, mr.right - DX_EYE, mr.top + mr.height / 2);
+      await sleep(260);
+      assert(env.store.writes.length === 1, "缺 revision 后仍继续盲写：" + env.store.writes.length);
+      assert(env.store.attempts.length === 1, "缺 revision 后仍发起第二次 RPC：" + env.store.attempts.length);
+      assert((env.store.value.hidden || []).indexOf("general") >= 0, "第一次写没有落盘");
+      assert((env.store.value.hidden || []).indexOf("models") >= 0, "快速两次操作未合并到最新快照");
+      return "拒绝第二次 RPC，writes=" + env.store.writes.length;
+    },
+  });
+
+  scenarios.push({
+    name: "并发边界：mutate 冲突也进入重读与三方合并",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3, { missingUpdateOnce: true, conflictMutateOnce: true });
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      var cell = cellBySection("models");
+      var r = cell.getBoundingClientRect();
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
+      await sleep(260);
+      var methods = env.store.attempts.map(function (a) { return a.method; });
+      assert(methods.join(",") === "update,mutate,update", "mutate 冲突后未 rebase：" + methods.join(","));
+      assert((env.store.value.hidden || []).indexOf("models") >= 0, "rebase 后本地改动未保存");
+      assert(env.store.writes.length === 1, "rebase 后写入次数异常");
+      return "attempts=" + methods.join(",");
+    },
+  });
+
+  scenarios.push({
+    name: "并发冲突：重读失败时不得盲写覆盖",
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      env.store.value.hidden = ["plugins", "account"];
+      env.store.revision++;
+      env.store.failDescribe = 1;
+      var cell = cellBySection("models");
+      var r = cell.getBoundingClientRect();
+      clickAt(cell, r.right - DX_EYE, r.top + r.height / 2);
+      await sleep(220);
+      assert(env.store.attempts.length === 1, "重读失败后仍发起了第二次写入");
+      assert(env.store.writes.length === 0, "重读失败后竟然写盘了");
+      var hidden = (env.store.value || {}).hidden || [];
+      assert(hidden.indexOf("account") >= 0 && hidden.indexOf("models") < 0, "远端数据被盲写覆盖：" + JSON.stringify(hidden));
+      return "拒绝盲写，保留远端 hidden=" + JSON.stringify(hidden);
+    },
+  });
+
+  scenarios.push({
+    name: "并发冲突：恢复默认保持全量重置语义",
+    oldFails: true,
+    run: async function () {
+      env.store = makeStore(SAVED, 3);
+      applyFresh();
+      await openPanel();
+      await enterEditing();
+      env.store.value.hidden = ["plugins", "account"];
+      env.store.revision++;
+      var resetBtn = document.querySelector("[data-snm-reset]");
+      assert(resetBtn, "编辑模式下未出现「恢复默认」");
+      resetBtn.click();
+      await sleep(250);
+      var w = env.store.value || {};
+      assert((w.hidden || []).length === 0, "恢复默认被远端并发新增项污染：" + JSON.stringify(w.hidden));
+      assert((w.groups || []).length === 0, "恢复默认没有清空抽屉");
+      assert(env.store.attempts.length >= 2, "恢复默认没有走冲突重试");
+      return "全量重置完成，rev=" + env.store.revision;
     },
   });
 

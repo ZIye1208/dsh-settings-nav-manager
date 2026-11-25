@@ -591,4 +591,197 @@ test("pinned：被隐藏的分区自动取消固定", () => {
   assert.equal(T.serializeState(st, KNOWN).pinned.length, 1);
 });
 
+test("isSettingsConflict：同时认当前网关码和旧内部码", () => {
+  assert.equal(T.isSettingsConflict({ code: "settings/conflict" }), true);
+  assert.equal(T.isSettingsConflict({ error: { code: "settings/conflict" } }), true);
+  assert.equal(T.isSettingsConflict({ code: "SETTINGS_CONFLICT" }), true);
+  assert.equal(T.isSettingsConflict({ error: { code: "SETTINGS_CONFLICT" } }), true);
+  assert.equal(T.isSettingsConflict({ code: "gateway/quota" }), false);
+  assert.equal(T.isSettingsConflict(null), false);
+});
+
+test("mergeSaveState：两个窗口分别隐藏/固定不同条目时合并双方改动", () => {
+  const base = T.createState({ order: ["general", "account", "models", "plugins"] });
+  const local = T.createState({ ...base, hidden: ["account"], pinned: ["models"] });
+  const remote = T.createState({ ...base, hidden: ["plugins"], pinned: ["general"] });
+  const out = T.mergeSaveState(base, local, remote);
+  assert.deepEqual(out.hidden.slice().sort(), ["account", "plugins"]);
+  assert.deepEqual(out.pinned.slice().sort(), ["general", "models"]);
+});
+
+test("mergeSaveState：本地改布局、远端改显隐/固定时两类改动都保留", () => {
+  const base = T.createState({ order: ["general", "account", "models"] });
+  const local = T.createState({ ...base, order: ["models", "general", "account"] });
+  const remote = T.createState({ ...base, hidden: ["account"], pinned: ["models"] });
+  const out = T.mergeSaveState(base, local, remote);
+  assert.deepEqual(out.order, ["models", "general", "account"]);
+  assert.deepEqual(out.hidden, ["account"]);
+  assert.deepEqual(out.pinned, ["models"]);
+});
+
+test("mergeSaveState：不同抽屉的不同属性改动合并，同一属性本地优先", () => {
+  const base = T.createState({
+    order: ["g-1", "g-2"],
+    groups: [
+      { id: "g-1", name: "A", collapsed: false, items: ["general"] },
+      { id: "g-2", name: "B", collapsed: false, items: ["account"] },
+    ],
+  });
+  const local = T.createState({
+    ...base,
+    groups: [
+      { id: "g-1", name: "A2", collapsed: false, items: ["general"] },
+      { id: "g-2", name: "B", collapsed: true, items: ["account"] },
+    ],
+  });
+  const remote = T.createState({
+    ...base,
+    groups: [
+      { id: "g-1", name: "A", collapsed: true, items: ["general"] },
+      { id: "g-2", name: "B2", collapsed: false, items: ["account"] },
+    ],
+  });
+  const out = T.mergeSaveState(base, local, remote);
+  assert.deepEqual(out.groups, [
+    { id: "g-1", name: "A2", collapsed: true, items: ["general"] },
+    { id: "g-2", name: "B2", collapsed: true, items: ["account"] },
+  ]);
+});
+
+test("mergeSaveState：同一抽屉分别加入不同条目时保留双方新增", () => {
+  const base = T.createState({
+    order: ["g-1"],
+    groups: [{ id: "g-1", name: "A", collapsed: false, items: ["general"] }],
+  });
+  const local = T.createState({
+    ...base,
+    groups: [{ id: "g-1", name: "A", collapsed: false, items: ["general", "account"] }],
+  });
+  const remote = T.createState({
+    ...base,
+    groups: [{ id: "g-1", name: "A", collapsed: false, items: ["general", "models"] }],
+  });
+  const out = T.mergeSaveState(base, local, remote);
+  assert.deepEqual(out.groups[0].items, ["general", "account", "models"]);
+});
+
+test("mergeSaveState：同一抽屉本地删除优先，同时保留远端独立新增", () => {
+  const base = T.createState({
+    order: ["g-1"],
+    groups: [{ id: "g-1", name: "A", collapsed: false, items: ["general", "account"] }],
+  });
+  const local = T.createState({
+    ...base,
+    groups: [{ id: "g-1", name: "A", collapsed: false, items: ["account"] }],
+  });
+  const remote = T.createState({
+    ...base,
+    groups: [{ id: "g-1", name: "A", collapsed: false, items: ["general", "account", "models"] }],
+  });
+  const out = T.mergeSaveState(base, local, remote);
+  assert.deepEqual(out.groups[0].items, ["account", "models"]);
+});
+
+test("mergeSaveState：本地新增抽屉成员时接受远端对基线成员的删除", () => {
+  const base = T.createState({
+    order: ["g-1"],
+    groups: [{ id: "g-1", name: "A", collapsed: false, items: ["general"] }],
+  });
+  const local = T.createState({
+    ...base,
+    groups: [{ id: "g-1", name: "A", collapsed: false, items: ["general", "account"] }],
+  });
+  const remote = T.createState({
+    ...base,
+    groups: [{ id: "g-1", name: "A", collapsed: false, items: [] }],
+  });
+  const out = T.mergeSaveState(base, local, remote);
+  assert.deepEqual(out.groups[0].items, ["account"], "远端删除 general 不能被本地新增 account 复活");
+});
+
+test("mergeSaveState：远端删除且本地未改的抽屉接受删除，本地改过则保留", () => {
+  const base = T.createState({
+    order: ["g-1", "g-2"],
+    groups: [
+      { id: "g-1", name: "A", items: [] },
+      { id: "g-2", name: "B", items: [] },
+    ],
+  });
+  const remote = T.createState({ ...base, groups: [base.groups[0]] });
+  const unchanged = T.mergeSaveState(base, T.createState(base), remote);
+  assert.deepEqual(unchanged.groups.map((g) => g.id), ["g-1"]);
+  const local = T.createState(base);
+  local.groups[1].name = "B2";
+  const changed = T.mergeSaveState(base, local, remote);
+  assert.deepEqual(changed.groups.map((g) => g.id), ["g-1", "g-2"]);
+  assert.equal(changed.groups[1].name, "B2");
+});
+
+test("mergeSaveState：合并后隐藏项自动退出固定集合", () => {
+  const base = T.createState({ pinned: ["general"] });
+  const local = T.createState({ ...base, hidden: ["general"] });
+  const remote = T.createState({ ...base, pinned: ["general", "models"] });
+  const out = T.mergeSaveState(base, local, remote);
+  assert.deepEqual(out.hidden, ["general"]);
+  assert.deepEqual(out.pinned, ["models"]);
+});
+
+test("mergeSaveState：双窗口同建 g-1 时本地组改 id，绝不覆盖远端组", () => {
+  const base = T.createState({ order: ["general"] });
+  const local = T.createState({
+    order: ["general", "g-1"],
+    groups: [{ id: "g-1", name: "本地", collapsed: false, items: ["account"] }],
+  });
+  const remote = T.createState({
+    order: ["general", "g-1"],
+    groups: [{ id: "g-1", name: "远端", collapsed: false, items: ["models"] }],
+  });
+  const out = T.mergeSaveState(base, local, remote, true);
+  assert.deepEqual(out.groups.map((g) => g.id), ["g-1", "g-2"]);
+  assert.equal(out.groups[0].name, "远端");
+  assert.equal(out.groups[1].name, "本地");
+  assert.ok(out.order.includes("g-1") && out.order.includes("g-2"));
+});
+
+test("mergeSaveState：无用户布局意图时接受远端排序，不把自动补 section 当重排", () => {
+  const base = T.createState({ order: ["general", "account", "models"] });
+  const local = T.createState({ ...base, order: ["general", "account", "models", "plugins"] });
+  const remote = T.createState({ ...base, order: ["models", "general", "account"] });
+  const out = T.mergeSaveState(base, local, remote, false);
+  assert.deepEqual(out.order, ["models", "general", "account"]);
+});
+
+test("mergeSaveState：有用户布局意图时本地排序优先，同时保留远端新增顶层 id", () => {
+  const base = T.createState({ order: ["general", "account"] });
+  const local = T.createState({ ...base, order: ["account", "general"] });
+  const remote = T.createState({ ...base, order: ["general", "account", "new-section"] });
+  const out = T.mergeSaveState(base, local, remote, true);
+  assert.deepEqual(out.order, ["account", "general", "new-section"]);
+});
+
+test("mergeSaveState：pinned 超限时先淘汰远端并发新增，保护本地固定操作", () => {
+  const base = T.createState({ pinned: ["a", "b", "c", "d"] });
+  const local = T.createState({ ...base, pinned: ["a", "b", "c", "d", "e"] });
+  const remote = T.createState({ ...base, pinned: ["a", "b", "c", "d", "f"] });
+  const out = T.mergeSaveState(base, local, remote);
+  assert.deepEqual(out.pinned, ["a", "b", "c", "d", "e"]);
+});
+
+test("mergeSaveState：远端删组后不得在 order 留下幽灵组 id", () => {
+  const base = T.createState({
+    order: ["g-1", "general"],
+    groups: [{ id: "g-1", name: "A", items: [] }],
+  });
+  const local = T.createState({ ...base, order: ["general", "g-1"] });
+  const remote = T.createState({ order: ["general"], groups: [] });
+  const out = T.mergeSaveState(base, local, remote, true);
+  assert.deepEqual(out.groups, []);
+  assert.deepEqual(out.order, ["general"]);
+});
+
+test("withTimeout：超时释放等待，正常 Promise 原样返回", async () => {
+  assert.equal(await T.withTimeout(Promise.resolve(7), 20, "rpc"), 7);
+  await assert.rejects(T.withTimeout(new Promise(() => {}), 5, "rpc"), /rpc timeout/);
+});
+
 

@@ -264,6 +264,259 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         pinned: s.pinned ? s.pinned.slice() : [],
       };
     }
+    function sameList(a, b) {
+      if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+      for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+      return true;
+    }
+    function sameLayout(a, b) {
+      if (!sameList(a.order, b.order) || !Array.isArray(a.groups) || !Array.isArray(b.groups) || a.groups.length !== b.groups.length) return false;
+      for (var i = 0; i < a.groups.length; i++) if (!sameGroup(a.groups[i], b.groups[i])) return false;
+      return true;
+    }
+    function cloneGroup(g) {
+      return { id: g.id, name: g.name, collapsed: !!g.collapsed, items: g.items.slice() };
+    }
+    function sameGroup(a, b) {
+      return !!a && !!b && a.id === b.id && a.name === b.name && !!a.collapsed === !!b.collapsed && sameList(a.items, b.items);
+    }
+    function groupMap(groups) {
+      var map = dict();
+      for (var i = 0; i < groups.length; i++) if (groups[i] && groups[i].id) map[groups[i].id] = groups[i];
+      return map;
+    }
+    // 单个抽屉的三方合并：不同属性各改各的；同一属性双方都改时本地显式操作优先。
+    function mergeGroup(base, local, remote) {
+      if (!base) return cloneGroup(local);
+      var out = cloneGroup(remote);
+      if (local.name !== base.name) out.name = local.name;
+      if (!!local.collapsed !== !!base.collapsed) out.collapsed = !!local.collapsed;
+      if (!sameList(local.items, base.items)) {
+        // 抽屉成员也是并发写入面：本地增删优先，同时保留远端独立新增。
+        // 但「基线有、远端已删、本地只是未删」的成员必须接受远端删除，不能复活。
+        out.items = mergeItemOrder(base.items, local.items, remote.items);
+      }
+      return out;
+    }
+    function mergeGroups(baseGroups, localGroups, remoteGroups) {
+      var bm = groupMap(baseGroups);
+      var lm = groupMap(localGroups);
+      var rm = groupMap(remoteGroups);
+      var ids = [];
+      var seen = dict();
+      function push(id) {
+        if (!id || own(seen, id)) return;
+        seen[id] = 1;
+        ids.push(id);
+      }
+      // 远端顺序优先；本地新增/复活的抽屉按本地顺序补到末尾。
+      remoteGroups.forEach(function (g) { push(g && g.id); });
+      localGroups.forEach(function (g) { push(g && g.id); });
+      var out = [];
+      for (var i = 0; i < ids.length; i++) {
+        var id = ids[i];
+        var b = bm[id];
+        var l = lm[id];
+        var r = rm[id];
+        if (!l) {
+          // 本地删除了已有抽屉：本地删除优先；远端新增则保留。
+          if (b) continue;
+          if (r) out.push(cloneGroup(r));
+          continue;
+        }
+        if (!r) {
+          // 远端删除、本地未改：接受删除；本地改过则保留本地版本。
+          if (b && sameGroup(b, l)) continue;
+          out.push(cloneGroup(l));
+          continue;
+        }
+        out.push(mergeGroup(b, l, r));
+      }
+      return out;
+    }
+    // 集合三方合并：保留远端改动，再叠加本地相对基线的增/删。
+    // 这样两个窗口分别隐藏/固定不同条目时不会互相覆盖。
+    function mergeIdSet(baseIds, localIds, remoteIds) {
+      var bs = dict();
+      var ls = dict();
+      var remove = dict();
+      var i;
+      for (i = 0; i < baseIds.length; i++) bs[baseIds[i]] = 1;
+      for (i = 0; i < localIds.length; i++) ls[localIds[i]] = 1;
+      for (i = 0; i < baseIds.length; i++) if (!own(ls, baseIds[i])) remove[baseIds[i]] = 1;
+      var out = [];
+      var seen = dict();
+      for (i = 0; i < remoteIds.length; i++) {
+        var id = remoteIds[i];
+        if (!id || own(remove, id) || own(seen, id)) continue;
+        seen[id] = 1;
+        out.push(id);
+      }
+      for (i = 0; i < localIds.length; i++) {
+        var added = localIds[i];
+        if (!added || own(bs, added) || own(seen, added)) continue;
+        seen[added] = 1;
+        out.push(added);
+      }
+      return out;
+    }
+    // 两个窗口从同一基线各自新建抽屉时，本地递增的 g-N 可能撞车。
+    // 同 id 但基线中不存在、双方内容又不同 → 本地组换新 id，绝不覆盖远端组。
+    function remapCollidingLocalGroups(baseGroups, localGroups, remoteGroups) {
+      var bm = groupMap(baseGroups);
+      var rm = groupMap(remoteGroups);
+      var used = dict();
+      var max = 0;
+      function mark(groups) {
+        for (var i = 0; i < groups.length; i++) {
+          var g = groups[i];
+          if (!g || !g.id) continue;
+          used[g.id] = 1;
+          var m = /^g-(\d+)$/.exec(g.id);
+          if (m) max = Math.max(max, parseInt(m[1], 10));
+        }
+      }
+      mark(baseGroups);
+      mark(localGroups);
+      mark(remoteGroups);
+      var remap = dict();
+      for (var j = 0; j < localGroups.length; j++) {
+        var local = localGroups[j];
+        if (!local || !local.id || bm[local.id] || !rm[local.id] || sameGroup(local, rm[local.id])) continue;
+        var n = max + 1;
+        while (own(used, "g-" + n)) n++;
+        var next = "g-" + n;
+        used[next] = 1;
+        max = n;
+        remap[local.id] = next;
+      }
+      return remap;
+    }
+    function mergeOrder(baseOrder, localOrder, remoteOrder, preferLocal) {
+      if (!preferLocal) return remoteOrder.slice();
+      // 本地显式排序优先，但远端并发新增的顶层 id 要保留，不能因整列覆盖而消失。
+      var baseSet = dict();
+      var seen = dict();
+      var out = [];
+      var i;
+      for (i = 0; i < baseOrder.length; i++) baseSet[baseOrder[i]] = 1;
+      for (i = 0; i < localOrder.length; i++) {
+        if (!localOrder[i] || own(seen, localOrder[i])) continue;
+        seen[localOrder[i]] = 1;
+        out.push(localOrder[i]);
+      }
+      for (i = 0; i < remoteOrder.length; i++) {
+        var id = remoteOrder[i];
+        if (!id || own(baseSet, id) || own(seen, id)) continue;
+        seen[id] = 1;
+        out.push(id);
+      }
+      return out;
+    }
+    function mergeItemOrder(baseOrder, localOrder, remoteOrder) {
+      // 成员列表同时承载「顺序」和「归属」：本地未删的基线成员，如果远端已删，
+      // 说明远端做了归属变更，必须删除；双方新增仍按 mergeOrder 保留。
+      var out = mergeOrder(baseOrder, localOrder, remoteOrder, true);
+      var baseSet = dict();
+      var remoteSet = dict();
+      var i;
+      for (i = 0; i < baseOrder.length; i++) baseSet[baseOrder[i]] = 1;
+      for (i = 0; i < remoteOrder.length; i++) remoteSet[remoteOrder[i]] = 1;
+      return out.filter(function (id) { return !own(baseSet, id) || own(remoteSet, id); });
+    }
+    function mergePinned(baseIds, localIds, remoteIds) {
+      var out = mergeIdSet(baseIds, localIds, remoteIds);
+      if (out.length <= MAX_PINNED) return out;
+      // 超限时先淘汰「远端并发新增、本地没见」的项，保护本地用户的显式固定操作。
+      var bs = dict();
+      var ls = dict();
+      var kept = [];
+      var seen = dict();
+      var i;
+      for (i = 0; i < baseIds.length; i++) bs[baseIds[i]] = 1;
+      for (i = 0; i < localIds.length; i++) ls[localIds[i]] = 1;
+      for (i = 0; i < out.length; i++) if (own(ls, out[i]) && !own(seen, out[i])) {
+        seen[out[i]] = 1;
+        kept.push(out[i]);
+      }
+      for (i = 0; i < out.length; i++) if (own(bs, out[i]) && !own(seen, out[i])) {
+        seen[out[i]] = 1;
+        kept.push(out[i]);
+      }
+      for (i = 0; i < out.length && kept.length < MAX_PINNED; i++) if (!own(seen, out[i])) {
+        seen[out[i]] = 1;
+        kept.push(out[i]);
+      }
+      return kept.slice(0, MAX_PINNED);
+    }
+    // 保存冲突时的三方合并：base=上次成功落盘态，local=当前内存态，remote=刚读到的盘态。
+    // preferLocalOrder 由「是否存在未落盘的用户布局意图」决定，不能只比较数组——
+    // sync() 自动追加新 section 也会改 order，那不是用户排序。
+    function mergeSaveState(base, local, remote, preferLocalOrder) {
+      var b = createState(base);
+      var l = createState(local);
+      var r = createState(remote);
+      var remap = remapCollidingLocalGroups(b.groups, l.groups, r.groups);
+      if (countKeys(remap)) {
+        l.groups = l.groups.map(function (g) {
+          var next = cloneGroup(g);
+          if (own(remap, next.id)) next.id = remap[next.id];
+          return next;
+        });
+        l.order = l.order.map(function (id) { return own(remap, id) ? remap[id] : id; });
+      }
+      var preferLocal = preferLocalOrder === undefined ? !sameList(b.order, l.order) : !!preferLocalOrder;
+      var out = cloneState(r);
+      out.order = mergeOrder(b.order, l.order, r.order, preferLocal);
+      out.groups = mergeGroups(b.groups, l.groups, r.groups);
+      // 远端删掉的基线抽屉不能以幽灵 id 留在 local order 里。
+      var baseGroups = dict();
+      var mergedGroups = dict();
+      for (var i = 0; i < b.groups.length; i++) baseGroups[b.groups[i].id] = 1;
+      for (var j = 0; j < out.groups.length; j++) mergedGroups[out.groups[j].id] = 1;
+      out.order = out.order.filter(function (id) { return !own(baseGroups, id) || own(mergedGroups, id); });
+      out.hidden = mergeIdSet(b.hidden, l.hidden, r.hidden);
+      out.pinned = mergePinned(b.pinned, l.pinned, r.pinned);
+      if (b.hideEntry !== l.hideEntry) out.hideEntry = l.hideEntry;
+      var hidden = dict();
+      var seenPin = dict();
+      var pins = [];
+      for (var h = 0; h < out.hidden.length; h++) hidden[out.hidden[h]] = 1;
+      for (var p = 0; p < out.pinned.length; p++) {
+        var id = out.pinned[p];
+        if (!id || own(hidden, id) || own(seenPin, id)) continue;
+        seenPin[id] = 1;
+        pins.push(id);
+      }
+      out.pinned = pins.slice(0, MAX_PINNED);
+      return out;
+    }
+    function isSettingsConflict(err) {
+      if (!err) return false;
+      return err.code === "settings/conflict" || err.code === "SETTINGS_CONFLICT" ||
+        !!(err.error && (err.error.code === "settings/conflict" || err.error.code === "SETTINGS_CONFLICT"));
+    }
+    function withTimeout(promise, ms, label) {
+      return new Promise(function (resolve, reject) {
+        var done = false;
+        var timer = setTimeout(function () {
+          if (done) return;
+          done = true;
+          reject(new Error(label + " timeout"));
+        }, ms);
+        Promise.resolve(promise).then(function (value) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve(value);
+        }, function (err) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          reject(err);
+        });
+      });
+    }
     function findGroup(state, id) {
       for (var i = 0; i < state.groups.length; i++) if (state.groups[i].id === id) return state.groups[i];
       return null;
@@ -911,6 +1164,10 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
     function createPlugin(ctx) {
       var editing = false;
       var state = { version: 1, order: [], groups: [], hidden: [] };
+      // 上次成功落盘/读到的完整状态，是冲突三方合并的基线。
+      var baseState = cloneState(state);
+      // 所有保存串行执行；快速连续操作合并到执行时的最新内存态，避免旧快照后写覆盖新快照。
+      var saveTail = Promise.resolve();
       var sections = [];
       var revision;
       // 实际用于写入的命名空间：默认 NS；若宿主把条目 id 改写（别名安装等），
@@ -922,6 +1179,12 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       // stateKnown=false 表示「还没成功读到盘上的内容」：此时内存态是空的默认值，
       // 写出去就是静默清档（审查 D-2）。只有 describe 成功返回才置 true。
       var stateKnown = false;
+      // 用户显式布局意图与 sync() 自动归一化分开计数；未落盘时冲突合并采用本地排序。
+      var layoutIntent = 0;
+      var savedLayoutIntent = 0;
+      function markLayoutIntent() {
+        layoutIntent++;
+      }
       var loadTries = 0;
       var groupSeq = 1;
       var t = null;
@@ -1831,7 +2094,7 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         } catch (e) {
           p = Promise.reject(e);
         }
-        return p.then(
+        return withTimeout(p, RPC_TIMEOUT_MS, method + " RPC").then(
           function (res) {
             if (!okOf(res)) {
               return { ok: false, res: res, error: (res && res.error) || { message: method + " rejected" } };
@@ -1853,7 +2116,9 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
           { op: "set", path: ["pinned"], value: payload.pinned },
         ];
       }
-      function persist() {
+      var MAX_CONFLICT_RETRIES = 2;
+      var RPC_TIMEOUT_MS = 8000;
+      function persist(opts) {
         // ① 还没成功读到盘上的内容 → 内存里是空默认值，写出去就是静默清档。
         if (!stateKnown) {
           dbg("save", "state unknown: describe 尚未成功，暂不写入");
@@ -1867,23 +2132,46 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
           report("save", null, "saveFailed"); // 不把内部 token 甩给用户看
           return Promise.resolve(false);
         }
-        var payload = serializeState(state);
+        // revision 是 CAS 的唯一依据；缺失说明响应/状态协议异常，宁可不写也不盲覆盖。
+        if (typeof revision !== "number") {
+          dbg("save", "revision unavailable: refusing write without CAS");
+          report("save", { code: "settings/revision-missing", message: "revision unavailable" });
+          return Promise.resolve(false);
+        }
+        var force = !!(opts && opts.reset === true);
+        // 关键：payload 必须在队列真正执行时截取，而不是 persist() 被调用的瞬间。
+        // 否则「操作 A 的写还没回、用户又操作 B」会让 A 的旧快照后落盘，覆盖 B。
+        var job = saveTail.then(function () {
+          return persistCurrent(force);
+        });
+        // 一次失败不能毒化后续保存；所有调用方拿到的仍是自己的 Promise<boolean>。
+        saveTail = job.catch(function () {
+          return false;
+        });
+        return job;
+      }
+      function persistCurrent(force) {
+        if (disposed) return Promise.resolve(false);
+        // 守卫必须在队列执行时再查一次：前一个任务可能刚把 revision 置空，
+        // 而 persist() 入队时看到的还是旧 numeric revision。
+        if (!stateKnown || !nsResolved || typeof revision !== "number") {
+          dbg("save", "queued save blocked: state/CAS baseline unavailable");
+          report("save", { code: "settings/revision-missing", message: "queued save has no CAS baseline" });
+          return Promise.resolve(false);
+        }
+        var snapshot = cloneState(state);
+        var payload = serializeState(snapshot);
         var ops = payloadOps(payload);
+        return attemptUpdate(payload, snapshot, ops, force, 0, layoutIntent);
+      }
+      function attemptUpdate(payload, snapshot, ops, force, retries, writtenIntent) {
         return writeVia("update", payload).then(function (r1) {
-          if (r1.ok) return settleOk(r1.res);
+          if (r1.ok) return settleOk(r1.res, snapshot, writtenIntent);
           dbg("update rejected", r1.error);
-          if (isConflict(r1.error)) {
-            return reloadRevision().then(function () {
-              return writeVia("update", payload).then(function (r1b) {
-                if (r1b.ok) return settleOk(r1b.res);
-                dbg("update retry rejected", r1b.error);
-                if (!isMissingEntry(r1b.error)) {
-                  report("save", r1b.error);
-                  return false;
-                }
-                return tryMutate(ops, r1b.error);
-              });
-            });
+          if (isSettingsConflict(r1.error)) {
+            if (retries < MAX_CONFLICT_RETRIES) return rebaseAndRetry(force, retries + 1);
+            report("save", r1.error);
+            return false;
           }
           // 只有「条目/命名空间不存在」值得换写入口重试。校验失败、配额、只读、
           // 权限拒绝都必须原样上报 —— 拿 replace 重试一个已被合法拒绝的写，
@@ -1892,20 +2180,46 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
             report("save", r1.error);
             return false;
           }
-          return tryMutate(ops, r1.error);
+          return tryMutate(ops, r1.error, snapshot, force, retries, writtenIntent);
+        });
+      }
+      function rebaseAndRetry(force, retries) {
+        return readRemoteState().then(function (remoteState) {
+          if (disposed) return false;
+          // 读不到完整远端态时绝不盲写：只更新 revision 后重放旧 payload 会覆盖别人。
+          if (!remoteState) {
+            report("save", { code: "settings/conflict", message: "describe failed" });
+            return false;
+          }
+          // 三方合并必须仍以「本地操作所基于的旧盘态」为 base；刚读到的 remote 是第三方改动。
+          // 合并后才把 base 推进到 remote，供下一轮冲突使用。
+          var mergeBase = baseState;
+          var preferLocalOrder = layoutIntent !== savedLayoutIntent;
+          var merged = force ? cloneState(state) : mergeSaveState(mergeBase, state, remoteState, preferLocalOrder);
+          baseState = cloneState(remoteState);
+          state = merged;
+          updateGroupSeq();
+          sync(); // 把远端合并进来的显隐/固定/布局变化反映到 UI
+          var snapshot = cloneState(state);
+          var payload = serializeState(snapshot);
+          var ops = payloadOps(payload);
+          return attemptUpdate(payload, snapshot, ops, force, retries, layoutIntent);
         });
       }
       // 唯一的降级目标：路径式写入（逐字段 set，宿主按路径校验，不会整份覆盖）。
       // 刻意不再使用 replace —— 它是整份替换，一旦命名空间认错就是清掉别人的配置。
-      function tryMutate(ops, firstError) {
+      function tryMutate(ops, firstError, snapshot, force, retries, writtenIntent) {
         return writeVia("mutate", null, ops).then(function (r2) {
-          if (r2.ok) return settleOk(r2.res);
+          if (r2.ok) return settleOk(r2.res, snapshot, writtenIntent);
           dbg("mutate rejected", r2.error);
+          if (isSettingsConflict(r2.error) && retries < MAX_CONFLICT_RETRIES) {
+            return rebaseAndRetry(force, retries + 1);
+          }
           report("save", r2.error || firstError);
           return false;
         });
       }
-      function settleOk(res) {
+      function settleOk(res, writtenState, writtenIntent) {
         clearReport("save");
         var view;
         try {
@@ -1913,37 +2227,54 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         } catch (e) {
           view = {};
         }
-        revision = typeof view.revision === "number" ? view.revision : undefined;
+        if (typeof view.revision !== "number") {
+          // 写请求可能已经成功，但响应协议坏了。停止后续 CAS 写入，绝不盲覆盖。
+          revision = undefined;
+          report("save", { code: "settings/revision-missing", message: "write response missing revision" });
+          return true;
+        }
+        revision = view.revision;
+        // 宿主可能在写入时规范化/并发推进数据。回执 value 是真实落盘态：
+        // 以 writtenState 为 base、当前 state 为 local、persisted 为 remote 再合并一次，
+        // 否则 base 推进了而 state 仍是旧快照，下一次保存会用新 revision 覆盖刚落盘的改动。
+        var persisted = view.value !== undefined && view.value !== null ? createState(view.value) : writtenState;
+        if (persisted) {
+          var persistedIntent = typeof writtenIntent === "number" ? writtenIntent : savedLayoutIntent;
+          var preferLocalOrder = layoutIntent !== persistedIntent;
+          state = mergeSaveState(writtenState, state, persisted, preferLocalOrder);
+          updateGroupSeq();
+          sync();
+          baseState = cloneState(persisted);
+        }
+        if (typeof writtenIntent === "number") savedLayoutIntent = writtenIntent;
         if (notice && reported.save) {
           reported.save = 0;
           setNotice("");
         }
         return true;
       }
-      function isConflict(err) {
-        return !!err && (err.code === "SETTINGS_CONFLICT" || (err.error && err.error.code === "SETTINGS_CONFLICT"));
-      }
-      function reloadRevision() {
+      // 冲突后必须重读「完整 value + numeric revision」；瞬时 describe 失败只结束本次保存，
+      // 不把 nsResolved 永久打成 false，也不清掉 revision 去无条件覆盖。
+      function readRemoteState() {
         var rm = remote();
-        if (!rm || typeof rm.describe !== "function") return Promise.resolve(undefined);
-        return Promise.resolve()
-          .then(function () {
-            return rm.describe();
-          })
+        if (!rm || typeof rm.describe !== "function") return Promise.resolve(null);
+        return withTimeout(Promise.resolve().then(function () {
+          return rm.describe();
+        }), RPC_TIMEOUT_MS, "describe RPC")
           .then(function (res) {
-            // 只取 revision，不改写入目标（nsResolved / nsId 由 loadState 决定）
             var located = locateNs(unwrapValue(res) || {});
-            revision = located.entry && typeof located.entry.revision === "number" ? located.entry.revision : undefined;
-            return revision;
+            if (!located.resolved || !located.entry || located.ns !== nsId) return null;
+            if (typeof located.entry.revision !== "number") return null;
+            revision = located.entry.revision;
+            return createState(located.entry.value);
           })
           .catch(function (e) {
             dbg("describe(retry)", e);
-            revision = undefined;
-            return undefined;
+            return null;
           });
       }
       // 纯查询：只回答「我们的命名空间在哪」，不碰实例状态。
-      // （写状态会带来一个坑：冲突重试时的 reloadRevision 也会查一次，
+      // （写状态会带来一个坑：冲突重试时的 readRemoteState 也会查一次，
       //   一次瞬时失败就会把 nsResolved 永久打成 false，之后再也不写。）
       // 返回 { resolved, ns, entry }：resolved=false 表示确认「这里没有我们的命名空间」。
       function locateNs(res) {
@@ -2002,7 +2333,10 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
             var ns = adoptNs(locateNs(view));
             if (!ns) dbg("namespace missing", "settings.describe 里没有 " + NS);
             state = createState(ns && ns.value);
+            baseState = cloneState(state);
             revision = ns && typeof ns.revision === "number" ? ns.revision : undefined;
+            layoutIntent = 0;
+            savedLayoutIntent = 0;
             updateGroupSeq();
             stateLoaded = true;
             // 读到了（哪怕是没有值的空文档）才允许写
@@ -2021,7 +2355,10 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
             // 就会把「全空」当成用户的排版写回去，而且因为写入成功，连报错都没有。
             stateKnown = false;
             state = createState(null);
+            baseState = cloneState(state);
             revision = undefined;
+            layoutIntent = 0;
+            savedLayoutIntent = 0;
             updateGroupSeq();
             stateLoaded = true;
             sync();
@@ -2259,6 +2596,7 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         };
         state.groups.push(g);
         state.order.push(g.id);
+        markLayoutIntent();
         sync();
         persist();
         var nav = findNav();
@@ -2281,6 +2619,7 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         }
         var gi = state.groups.indexOf(g);
         if (gi >= 0) state.groups.splice(gi, 1);
+        markLayoutIntent();
         sync();
         persist();
       }
@@ -2304,8 +2643,10 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       function resetAll() {
         state = createState(null);
         groupSeq = 1;
+        markLayoutIntent();
         sync();
-        persist();
+        // 恢复默认是显式全量重置；冲突时采用本地空态，不把远端并发新增项合并回来。
+        persist({ reset: true });
         setNotice(t ? t("resetDone") : DICT.zh.resetDone);
       }
 
@@ -2516,11 +2857,15 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
             state = finished.base; // 取消 → 回滚
           }
         }
+        var layoutChanged = !!(wasActive && finished.base && !sameLayout(finished.base, state));
         drag = null;
         if (wasActive) {
           justActedAt = Date.now();
           sync();
-          if (commit) persist();
+          if (commit && layoutChanged) {
+            markLayoutIntent();
+            persist();
+          }
         }
       }
 
@@ -2591,7 +2936,10 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
           if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
             e.preventDefault();
             e.stopPropagation();
+            var beforeHeaderNudge = state;
             state = nudgeState(state, header.getAttribute(DATA.groupId), e.key === "ArrowUp" ? -1 : 1);
+            if (sameLayout(beforeHeaderNudge, state)) return;
+            markLayoutIntent();
             sync();
             persist();
           }
@@ -2603,7 +2951,10 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
         if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
           e.preventDefault();
           e.stopPropagation();
+          var beforeRowNudge = state;
           state = nudgeState(state, id, e.key === "ArrowUp" ? -1 : 1);
+          if (sameLayout(beforeRowNudge, state)) return;
+          markLayoutIntent();
           sync();
           persist();
           return;
@@ -3385,6 +3736,9 @@ var HINT_MS = 8000; // 编辑说明浮层自动收起前的停留时间
       PIN_ORDER_BASE: PIN_ORDER_BASE,
       PIN_ID_PREFIX: PIN_ID_PREFIX,
       isMissingEntry: isMissingEntry,
+      isSettingsConflict: isSettingsConflict,
+      mergeSaveState: mergeSaveState,
+      withTimeout: withTimeout,
       looksLikeOurs: looksLikeOurs,
       looksLikeOurValue: looksLikeOurValue,
     };
